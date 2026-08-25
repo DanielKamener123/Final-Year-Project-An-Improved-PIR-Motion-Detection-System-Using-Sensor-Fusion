@@ -7,57 +7,53 @@ import numpy as np
 from scipy import ndimage
 
 # Config
+alpha = 0.995                 
+sigmaMin = 0.05 # Minimum sSgma
 
-@dataclass
-class PipelineConfig:
-    alpha: float = 0.995                 
-    sigmaMin: float = 0.05 # minimum sigma
+# Spatial filter
+gaussianKernel: np.ndarray = field(default_factory=lambda: np.array([
+    [1, 2, 1],
+    [2, 4, 2],
+    [1, 2, 1],
+], dtype=np.float64) / 16.0)
+filterMode = "reflect"
 
-    # Spatial filter
-    gaussian_kernel: np.ndarray = field(default_factory=lambda: np.array([
-        [1, 2, 1],
-        [2, 4, 2],
-        [1, 2, 1],
-    ], dtype=np.float64) / 16.0)
-    filter_mode: str = "reflect"
+# Threshold
+fixed_threshold: float = 3.0 # When not using adaptive thresholding
+use_adaptive_threshold: bool = False
+adaptive_coeffs: Optional[np.ndarray] = None # [a, b, c]
+adaptive_min_threshold: float = 1.5  # lower bound
+adaptive_max_threshold: float = 8.0  # upper bound
 
-    # Threshold
-    fixed_threshold: float = 3.0 # When not using adaptive thresholding
-    use_adaptive_threshold: bool = False
-    adaptive_coeffs: Optional[np.ndarray] = None # [a, b, c]
-    adaptive_min_threshold: float = 1.5  # lower bound
-    adaptive_max_threshold: float = 8.0  # upper bound
+# Blob extraction
+connectivity_8: bool = True
+min_blob_pixels: int = 1 # Blobs smaller than this are discarded
 
-    # Blob extraction
-    connectivity_8: bool = True
-    min_blob_pixels: int = 1 # Blobs smaller than this are discarded
+# Feature scoring
+expected_max_z: float = 10.0         # contrast normalisation ceiling
+# pixel_count-vs-range lookup: list of (range_m, expected_pixels) pairs,
+# sorted by range. Fill in from your own MLX90640 characterisation.
+size_lookup: np.ndarray = field(default_factory=lambda: np.array([
+    [1.0, 30.0],
+    [2.0, 14.0],
+    [3.0, 7.0],
+    [4.0, 4.0],
+    [5.0, 2.0],
+]))
+aspect_ratio_min: float = 0.5
+aspect_ratio_max: float = 2.5
+max_expected_motion_px: float = 6.0  # per-frame centroid displacement ceiling
 
-    # Feature scoring
-    expected_max_z: float = 10.0         # contrast normalisation ceiling
-    # pixel_count-vs-range lookup: list of (range_m, expected_pixels) pairs,
-    # sorted by range. Fill in from your own MLX90640 characterisation.
-    size_lookup: np.ndarray = field(default_factory=lambda: np.array([
-        [1.0, 30.0],
-        [2.0, 14.0],
-        [3.0, 7.0],
-        [4.0, 4.0],
-        [5.0, 2.0],
-    ]))
-    aspect_ratio_min: float = 0.5
-    aspect_ratio_max: float = 2.5
-    max_expected_motion_px: float = 6.0  # per-frame centroid displacement ceiling
-
-    # Feature weights - must sum to 1.0
-    w_contrast: float = 0.35
-    w_size: float = 0.25
-    w_aspect: float = 0.20
-    w_motion: float = 0.20
+# Feature weights - must sum to 1.0
+w_contrast: float = 0.35
+w_size: float = 0.25
+w_aspect: float = 0.20
+w_motion: float = 0.20
 
 # Background model
 class BackgroundModel:
 
-    def __init__(self, shape: tuple[int, int], config: PipelineConfig):
-        self.config = config
+    def __init__(self, shape: tuple[int, int]):
         self.bg = np.zeros(shape, dtype=np.float64)
         self.sigma = np.full(shape, config.sigmaMin, dtype=np.float64)
         self._initialised = False
@@ -66,22 +62,21 @@ class BackgroundModel:
     def warm_start(self, calibration_frames: np.ndarray) -> None:
         self.bg[:] = calibration_frames.mean(axis=0)
         measured_sigma = calibration_frames.std(axis=0)
-        self.sigma = np.maximum(measured_sigma, self.config.sigma_floor)
+        self.sigma = np.maximum(measured_sigma, self.config.sigmaMin)
         self._initialised = True
 
     # Update Background
     def update(self, frame: np.ndarray, foreground_mask: np.ndarray) -> None:
-        alpha = self.config.alpha
         update_mask = ~foreground_mask
 
         # Updates Background Where No Humans
-        new_bg = alpha * self.bg + (1 - alpha) * frame
+        new_bg = ALPHA * self.bg + (1 - ALPHA) * frame
         self.bg = np.where(update_mask, new_bg, self.bg)
 
         # Update Sigma Where No Human
-        new_sigma_sq = alpha * (self.sigma ** 2) + (1 - alpha) * (self.bg - frame) ** 2
+        new_sigma_sq = ALPHA * (self.sigma ** 2) + (1 - ALPHA) * (self.bg - frame) ** 2
         new_sigma = np.sqrt(new_sigma_sq)
-        new_sigma = np.maximum(new_sigma, self.config.sigma_floor)
+        new_sigma = np.maximum(new_sigma, sigmaMin)
         self.sigma = np.where(update_mask, new_sigma, self.sigma)
 
     # Calculate Z value - How many multiples of this pixels normal variation is present
@@ -94,8 +89,8 @@ class BackgroundModel:
 
 
 # Spatial filtering
-def gaussian_filter_3x3(z_grid: np.ndarray, config: PipelineConfig) -> np.ndarray:
-    return ndimage.convolve(z_grid, config.gaussian_kernel, mode=config.filter_mode)
+def gaussian_filter_3x3(z_grid: np.ndarray,) -> np.ndarray:
+    return ndimage.convolve(z_grid, gaussianKernel, mode=filterMode)
 
 
 # Thresholding 
@@ -331,34 +326,3 @@ class ThermopilePipeline:
         self._prev_blobs = blobs
 
         return results
-
-
-# --------------------------------------------------------------------------
-# Minimal usage example
-# --------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    # Replace this with real frames from the MLX90640 (via the FT232H
-    # bridge during bring-up, or native I2C on the Rock 4C+ at deployment).
-    frame_shape = (24, 32)
-    pipeline = ThermopilePipeline(frame_shape=frame_shape)
-
-    rng = np.random.default_rng(seed=0)
-    ambient = 22.0
-
-    # Warm-up: 20 empty-scene frames so sigma reflects real noise levels
-    # before live processing starts (see BackgroundModel.warm_start).
-    calibration_frames = ambient + rng.normal(0, 0.3, size=(20, *frame_shape))
-    pipeline.warm_start(calibration_frames)
-
-    for frame_idx in range(5):
-        frame = ambient + rng.normal(0, 0.3, size=frame_shape)
-        if frame_idx >= 2:
-            frame[10:13, 14:17] += 8.0  # simulate a person-shaped warm blob
-
-        detections = pipeline.process_frame(frame)
-
-        print(f"Frame {frame_idx}: {len(detections)} blob(s)")
-        for d in detections:
-            print(f"  blob id={d.blob.id} pixels={d.blob.pixel_count} "
-                  f"centroid={d.blob.centroid} confidence={d.confidence:.3f}")

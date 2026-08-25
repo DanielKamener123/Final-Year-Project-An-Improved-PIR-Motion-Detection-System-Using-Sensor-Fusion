@@ -13,13 +13,8 @@ mlx.refresh_rate = REFRESH_RATE
 
 frame_buffer = [0.0] * 768  # 32 x 24
 
-
+# Reads Frame From Thermopile
 def getFrame():
-    """
-    Block until a new frame is available, then return it as a flat
-    list of 768 temperatures in degrees Celsius (row-major, row 0 =
-    top of the sensor's field of view).
-    """
     while True:
         try:
             mlx.getFrame(frame_buffer)
@@ -32,6 +27,6 @@ def getFrame():
 
 
 if __name__ == "__main__":
-    # Simple standalone smoke test.
+    # Tests To Ensure Frame Is Being Read
     frame = getFrame()
-    print(f"Got frame with {len(frame)} pixels. min={min(frame):.2f}C max={max(frame):.2f}C")
+    print(frame)
