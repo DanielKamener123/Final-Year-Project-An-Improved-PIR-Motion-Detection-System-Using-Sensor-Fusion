@@ -16,18 +16,18 @@ gaussianKernel = np.array([
 filterMode = "reflect"
 
 # Threshold
-fixed_threshold: float = 3.0 # When not using adaptive thresholding
+fixed_threshold = 3.0 # When not using adaptive thresholding
 use_adaptive_threshold: bool = False
 adaptive_coeffs = None # [a, b, c] TODO: Replace with proper coefficients
 adaptive_min_threshold: float = 1.5  # lower bound
 adaptive_max_threshold: float = 8.0  # upper bound
 
 # Blob extraction
-connectivity_8: bool = True
+connectivity_8 = True
 min_blob_pixels: int = 1 # Blobs smaller than this are discarded
 
 # Feature scoring
-expected_max_z: float = 10.0         # contrast normalisation ceiling
+expected_max_z = 10.0         # contrast normalisation ceiling
 # TODO: Replace with proper range to pixel count
 size_lookup = np.array([
     [1.0, 30.0],
@@ -36,11 +36,11 @@ size_lookup = np.array([
     [4.0, 4.0],
     [5.0, 2.0],
 ])
-aspect_ratio_min: float = 0.5
-aspect_ratio_max: float = 2.5
+aspect_ratio_min = 0.5
+aspect_ratio_max = 2.5
 
 # TODO: Replace with proper motion parameters
-max_expected_motion_px: float = 6.0  # per frame centroid displacement ceiling
+max_expected_motion_px = 6.0  # per frame centroid displacement ceiling
 
 # Feature weights - must sum to 1.0 TODO: Replace with proper weights
 w_contrast: float = 0.35

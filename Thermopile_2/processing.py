@@ -1,7 +1,7 @@
 import numpy as np
 
 from interface import getFrame as getRawFrame
-from thermopile_pipeline import DetectionResult, ThermopilePipeline
+from thermopile_pipeline import ThermopilePipeline
 
 WIDTH = 32
 HEIGHT = 24
