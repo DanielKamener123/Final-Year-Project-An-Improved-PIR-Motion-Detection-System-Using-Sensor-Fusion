@@ -1,27 +1,24 @@
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 import numpy as np
 from scipy import ndimage
 
 # Config
-alpha = 0.995                 
-sigmaMin = 0.05 # Minimum sSgma
+ALPHA = 0.995                 
+SIGMA_MIN = 0.05 # Minimum Sigma
 
 # Spatial filter
-gaussianKernel: np.ndarray = field(default_factory=lambda: np.array([
+gaussianKernel = np.array([
     [1, 2, 1],
     [2, 4, 2],
     [1, 2, 1],
-], dtype=np.float64) / 16.0)
+]) / 16.0
 filterMode = "reflect"
 
 # Threshold
 fixed_threshold: float = 3.0 # When not using adaptive thresholding
 use_adaptive_threshold: bool = False
-adaptive_coeffs: Optional[np.ndarray] = None # [a, b, c]
+adaptive_coeffs = None # [a, b, c] TODO: Replace with proper coefficients
 adaptive_min_threshold: float = 1.5  # lower bound
 adaptive_max_threshold: float = 8.0  # upper bound
 
@@ -31,42 +28,42 @@ min_blob_pixels: int = 1 # Blobs smaller than this are discarded
 
 # Feature scoring
 expected_max_z: float = 10.0         # contrast normalisation ceiling
-# pixel_count-vs-range lookup: list of (range_m, expected_pixels) pairs,
-# sorted by range. Fill in from your own MLX90640 characterisation.
-size_lookup: np.ndarray = field(default_factory=lambda: np.array([
+# TODO: Replace with proper range to pixel count
+size_lookup = np.array([
     [1.0, 30.0],
     [2.0, 14.0],
     [3.0, 7.0],
     [4.0, 4.0],
     [5.0, 2.0],
-]))
+])
 aspect_ratio_min: float = 0.5
 aspect_ratio_max: float = 2.5
-max_expected_motion_px: float = 6.0  # per-frame centroid displacement ceiling
 
-# Feature weights - must sum to 1.0
+# TODO: Replace with proper motion parameters
+max_expected_motion_px: float = 6.0  # per frame centroid displacement ceiling
+
+# Feature weights - must sum to 1.0 TODO: Replace with proper weights
 w_contrast: float = 0.35
 w_size: float = 0.25
 w_aspect: float = 0.20
 w_motion: float = 0.20
 
-# Background model
+# Background Model Class
 class BackgroundModel:
-
-    def __init__(self, shape: tuple[int, int]):
-        self.bg = np.zeros(shape, dtype=np.float64)
-        self.sigma = np.full(shape, config.sigmaMin, dtype=np.float64)
+    def __init__(self, shape):
+        self.bg = np.zeros(shape)
+        self.sigma = np.full(shape, SIGMA_MIN)
         self._initialised = False
 
     # Calibrate Background
-    def warm_start(self, calibration_frames: np.ndarray) -> None:
+    def warm_start(self, calibration_frames):
         self.bg[:] = calibration_frames.mean(axis=0)
         measured_sigma = calibration_frames.std(axis=0)
-        self.sigma = np.maximum(measured_sigma, self.config.sigmaMin)
+        self.sigma = np.maximum(measured_sigma, SIGMA_MIN)
         self._initialised = True
 
     # Update Background
-    def update(self, frame: np.ndarray, foreground_mask: np.ndarray) -> None:
+    def update(self, frame, foreground_mask):
         update_mask = ~foreground_mask
 
         # Updates Background Where No Humans
@@ -76,28 +73,25 @@ class BackgroundModel:
         # Update Sigma Where No Human
         new_sigma_sq = ALPHA * (self.sigma ** 2) + (1 - ALPHA) * (self.bg - frame) ** 2
         new_sigma = np.sqrt(new_sigma_sq)
-        new_sigma = np.maximum(new_sigma, sigmaMin)
+        new_sigma = np.maximum(new_sigma, SIGMA_MIN)
         self.sigma = np.where(update_mask, new_sigma, self.sigma)
 
     # Calculate Z value - How many multiples of this pixels normal variation is present
-    def z_score(self, frame: np.ndarray) -> np.ndarray:
+    def z_score(self, frame):
         return np.abs(self.bg - frame) / self.sigma
 
     # Calculate Mean Background Temp For Adaptive Thresholding
-    def scene_temperature(self) -> float:
+    def scene_temperature(self):
         return float(np.mean(self.bg))
 
-
 # Spatial filtering
-def gaussian_filter_3x3(z_grid: np.ndarray,) -> np.ndarray:
+def gaussian_filter(z_grid):
     return ndimage.convolve(z_grid, gaussianKernel, mode=filterMode)
-
 
 # Thresholding 
 
-
-def fit_adaptive_threshold_curve(scene_temps: np.ndarray,
-                                  optimal_thresholds: np.ndarray) -> np.ndarray:
+#TODO: Understand
+def fit_adaptive_threshold_curve(scene_temps, optimal_thresholds):
     """
     Fit a quadratic curve: threshold = a*T^2 + b*T + c
 
@@ -110,17 +104,17 @@ def fit_adaptive_threshold_curve(scene_temps: np.ndarray,
     return coeffs
 
 # Calculate Threshold Using Either Adaptive or Fixed Thresholding
-def compute_threshold(scene_temp: float, config: PipelineConfig) -> float:
-    if not config.use_adaptive_threshold or config.adaptive_coeffs is None:
-        return config.fixed_threshold
+def compute_threshold(scene_temp):
+    if not use_adaptive_threshold or adaptive_coeffs is None:
+        return fixed_threshold
 
-    a, b, c = config.adaptive_coeffs
+    a, b, c = adaptive_coeffs
     threshold = a * scene_temp**2 + b * scene_temp + c
-    threshold = np.clip(threshold, config.adaptive_min_threshold, config.adaptive_max_threshold)
+    threshold = np.clip(threshold, adaptive_min_threshold, adaptive_max_threshold)
     return float(threshold)
 
 # Apply Threshold To Get Mask
-def apply_threshold(smoothed_z: np.ndarray, threshold: float) -> np.ndarray:
+def apply_threshold(smoothed_z, threshold):
     return smoothed_z > threshold
 
 # Blob extraction
@@ -134,9 +128,9 @@ class Blob:
 
 
 # Extract Blobs
-def extract_blobs(binary_mask: np.ndarray, config: PipelineConfig) -> list[Blob]:
-    if config.connectivity_8:
-        structure = np.ones((3, 3), dtype=int)
+def extract_blobs(binary_mask):
+    if connectivity_8:
+        structure = np.ones((3, 3))
     else:
         structure = np.array([[0, 1, 0],
                                [1, 1, 1],
@@ -148,7 +142,7 @@ def extract_blobs(binary_mask: np.ndarray, config: PipelineConfig) -> list[Blob]
     for blob_id in range(1, num_blobs + 1):
         blob_mask = labelled_grid == blob_id
         pixel_count = int(blob_mask.sum())
-        if pixel_count < config.min_blob_pixels:
+        if pixel_count < min_blob_pixels:
             continue
 
         centroid = ndimage.center_of_mass(binary_mask, labelled_grid, blob_id)
@@ -174,8 +168,7 @@ class BlobFeatures:
     motion_score: float
 
 
-def _estimate_expected_pixels(centroid_row: float, frame_rows: int,
-                               config: PipelineConfig) -> float:
+def _estimate_expected_pixels(centroid_row, frame_rows):
     """
     Rough range estimate from vertical position in frame, mapped through
     the size_lookup table. Replace this mapping with your actual mounting
@@ -184,23 +177,20 @@ def _estimate_expected_pixels(centroid_row: float, frame_rows: int,
     """
     # naive placeholder: assume top row = farthest, bottom row = nearest
     frac = centroid_row / max(frame_rows - 1, 1)
-    ranges = config.size_lookup[:, 0]
+    ranges = size_lookup[:, 0]
     range_m = ranges[0] + frac * (ranges[-1] - ranges[0])
-    expected_pixels = np.interp(range_m, config.size_lookup[:, 0], config.size_lookup[:, 1])
+    expected_pixels = np.interp(range_m, size_lookup[:, 0], size_lookup[:, 1])
     return float(expected_pixels)
 
-
-def score_blob(blob: Blob, smoothed_z: np.ndarray, frame_shape: tuple[int, int],
-               prev_centroid: Optional[tuple[float, float]],
-               config: PipelineConfig) -> BlobFeatures:
+def score_blob(blob, smoothed_z, frame_shape, prev_centroid):
     """Step 6: compute the four features for a single blob."""
 
     # Feature 1: contrast (peak Z-score within the blob)
     peak_z = float(np.max(smoothed_z[blob.mask]))
-    contrast_score = min(peak_z / config.expected_max_z, 1.0)
+    contrast_score = min(peak_z / expected_max_z, 1.0)
 
     # Feature 2: size-at-range
-    expected_pixels = _estimate_expected_pixels(blob.centroid[0], frame_shape[0], config)
+    expected_pixels = _estimate_expected_pixels(blob.centroid[0], frame_shape[0])
     if expected_pixels > 0:
         size_score = 1.0 - abs(blob.pixel_count - expected_pixels) / expected_pixels
         size_score = max(size_score, 0.0)
@@ -212,14 +202,14 @@ def score_blob(blob: Blob, smoothed_z: np.ndarray, frame_shape: tuple[int, int],
     height = max_row - min_row + 1
     width = max_col - min_col + 1
     aspect_ratio = height / width if width > 0 else 0.0
-    if config.aspect_ratio_min <= aspect_ratio <= config.aspect_ratio_max:
+    if aspect_ratio_min <= aspect_ratio <= aspect_ratio_max:
         aspect_score = 1.0
     else:
         # linear fall-off outside the plausible band
-        if aspect_ratio < config.aspect_ratio_min:
-            dist = config.aspect_ratio_min - aspect_ratio
+        if aspect_ratio < aspect_ratio_min:
+            dist = aspect_ratio_min - aspect_ratio
         else:
-            dist = aspect_ratio - config.aspect_ratio_max
+            dist = aspect_ratio - aspect_ratio_max
         aspect_score = max(1.0 - dist, 0.0)
 
     # Feature 4: centroid motion vs previous frame's matched blob
@@ -231,7 +221,7 @@ def score_blob(blob: Blob, smoothed_z: np.ndarray, frame_shape: tuple[int, int],
         displacement = float(np.hypot(dr, dc))
         # simple bell-shaped preference: some motion good, too much or
         # none is penalised -- tune against real walking-speed data
-        normalised = displacement / config.max_expected_motion_px
+        normalised = displacement / max_expected_motion_px
         motion_score = max(1.0 - abs(normalised - 0.3), 0.0)
 
     return BlobFeatures(
@@ -241,9 +231,7 @@ def score_blob(blob: Blob, smoothed_z: np.ndarray, frame_shape: tuple[int, int],
         motion_score=motion_score,
     )
 
-
-def match_previous_blob(blob: Blob, prev_blobs: list[Blob],
-                         max_match_distance: float) -> Optional[tuple[float, float]]:
+def match_previous_blob(blob, prev_blobs, max_match_distance):
     """
     Nearest-centroid matching against the previous frame's blobs, used to
     feed prev_centroid into score_blob for the motion feature.
@@ -263,14 +251,13 @@ def match_previous_blob(blob: Blob, prev_blobs: list[Blob],
 
     return best_centroid
 
-
 # Confidence score
-def compute_confidence(features: BlobFeatures, config: PipelineConfig) -> float:
+def compute_confidence(features):
     confidence = (
-        config.w_contrast * features.contrast
-        + config.w_size * features.size_score
-        + config.w_aspect * features.aspect_score
-        + config.w_motion * features.motion_score
+        w_contrast * features.contrast
+        + w_size * features.size_score
+        + w_aspect * features.aspect_score
+        + w_motion * features.motion_score
     )
     return float(np.clip(confidence, 0.0, 1.0))
 
@@ -282,19 +269,17 @@ class DetectionResult:
     confidence: float
 
 class ThermopilePipeline:
-    def __init__(self, frame_shape: tuple[int, int] = (24, 32),
-                 config: Optional[PipelineConfig] = None):
-        self.config = config or PipelineConfig()
+    def __init__(self, frame_shape):
         self.frame_shape = frame_shape
-        self.bg_model = BackgroundModel(frame_shape, self.config)
+        self.bg_model = BackgroundModel(frame_shape)
         self._prev_mask = np.zeros(frame_shape, dtype=bool)
         self._prev_blobs: list[Blob] = []
 
     # Get Background Without Human
-    def warm_start(self, calibration_frames: np.ndarray) -> None:
+    def warm_start(self, calibration_frames):
         self.bg_model.warm_start(calibration_frames)
 
-    def process_frame(self, frame: np.ndarray) -> list[DetectionResult]:
+    def process_frame(self, frame):
         # Steps 1: Update Background + Sigma
         self.bg_model.update(frame, self._prev_mask)
 
@@ -302,23 +287,23 @@ class ThermopilePipeline:
         z = self.bg_model.z_score(frame)
 
         # Step 3: Spatial Filtering
-        smoothed_z = gaussian_filter_3x3(z, self.config)
+        smoothed_z = gaussian_filter(z)
 
         # Step 4: Threshold
         scene_temp = self.bg_model.scene_temperature()
-        threshold = compute_threshold(scene_temp, self.config)
+        threshold = compute_threshold(scene_temp)
         mask = apply_threshold(smoothed_z, threshold)
 
         # Step 5: Blob extraction
-        blobs = extract_blobs(mask, self.config)
+        blobs = extract_blobs(mask)
 
         # Steps 6-7: Feature scoring + Confidence Per Blob
-        results: list[DetectionResult] = []
-        max_match_distance = self.config.max_expected_motion_px * 1.5
+        results = []
+        max_match_distance = max_expected_motion_px * 1.5
         for blob in blobs:
             prev_centroid = match_previous_blob(blob, self._prev_blobs, max_match_distance)
-            features = score_blob(blob, smoothed_z, self.frame_shape, prev_centroid, self.config)
-            confidence = compute_confidence(features, self.config)
+            features = score_blob(blob, smoothed_z, self.frame_shape, prev_centroid)
+            confidence = compute_confidence(features)
             results.append(DetectionResult(blob=blob, features=features, confidence=confidence))
 
         # Store Previous Info

@@ -1,7 +1,7 @@
 import numpy as np
 
 from interface import getFrame as getRawFrame
-from thermopile_pipeline import DetectionResult, PipelineConfig, ThermopilePipeline
+from thermopile_pipeline import DetectionResult, ThermopilePipeline
 
 WIDTH = 32
 HEIGHT = 24
@@ -9,18 +9,13 @@ FRAME_SHAPE = (HEIGHT, WIDTH)
 
 N_WARMUP_FRAMES = 20
 
-Config = PipelineConfig()
-Pipeline = ThermopilePipeline(frame_shape=FRAME_SHAPE, config=Config)
+Pipeline = ThermopilePipeline(frame_shape=FRAME_SHAPE)
 
-# Cached from the most recent getFrame() call, so getDetections()
-# doesn't have to reprocess the frame or block on the sensor again.
-LatestDetections: list[DetectionResult] = []
-
+LatestDetections = []
 
 # Convert a 1D array into a 2D array.
 def convertFlatArray(flatFrame):
     return np.array(flatFrame, dtype=np.float64).reshape(FRAME_SHAPE)
-
 
 # Captures frames to use as initialised background model
 def warmUp():
@@ -31,21 +26,9 @@ def warmUp():
     Pipeline.warm_start(calibrationFrames)
     print("Warm Up Complete")
 
-
-warmUp()
-
-
+# Process Frame
 def getFrame():
-    """
-    Return the current raw frame as a flat list of 768 temperatures,
-    unchanged -- same return contract as before, so display.py works
-    without modification.
-
-    Also runs that same frame through the detection pipeline and
-    caches the result for getDetections(). Call this once per loop
-    iteration; getDetections() reads the cache from that call.
-    """
-    global _latestDetections
+    global LatestDetections
 
     rawFrame = getRawFrame()
     frameArray = convertFlatArray(rawFrame)
@@ -53,7 +36,7 @@ def getFrame():
 
     return rawFrame
 
-
+# Return the list of DetectionResult from the most recently frame
 def getDetections():
     """
     Return the list of DetectionResult objects (blob, features,
