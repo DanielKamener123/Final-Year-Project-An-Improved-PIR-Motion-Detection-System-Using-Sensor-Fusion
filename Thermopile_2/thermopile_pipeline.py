@@ -167,7 +167,7 @@ class BlobFeatures:
     aspect_score: float
     motion_score: float
 
-
+# TODO: Replace with proper range to pixel count
 def _estimate_expected_pixels(centroid_row, frame_rows):
     """
     Rough range estimate from vertical position in frame, mapped through
@@ -183,13 +183,11 @@ def _estimate_expected_pixels(centroid_row, frame_rows):
     return float(expected_pixels)
 
 def score_blob(blob, smoothed_z, frame_shape, prev_centroid):
-    """Step 6: compute the four features for a single blob."""
-
-    # Feature 1: contrast (peak Z-score within the blob)
+    # Feature 1: contrast
     peak_z = float(np.max(smoothed_z[blob.mask]))
     contrast_score = min(peak_z / expected_max_z, 1.0)
 
-    # Feature 2: size-at-range
+    # Feature 2: Size at Range
     expected_pixels = _estimate_expected_pixels(blob.centroid[0], frame_shape[0])
     if expected_pixels > 0:
         size_score = 1.0 - abs(blob.pixel_count - expected_pixels) / expected_pixels
@@ -197,7 +195,7 @@ def score_blob(blob, smoothed_z, frame_shape, prev_centroid):
     else:
         size_score = 0.0
 
-    # Feature 3: aspect ratio
+    # Feature 3: Aspect Ratio
     min_row, min_col, max_row, max_col = blob.bbox
     height = max_row - min_row + 1
     width = max_col - min_col + 1
