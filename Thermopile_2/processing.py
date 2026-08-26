@@ -3,11 +3,6 @@ import numpy as np
 from interface import getFrame as getRawFrame
 from thermopile_pipeline import ThermopilePipeline
 
-from frame_grabber import FrameGrabber
-
-_grabber = FrameGrabber()
-_grabber.start()
-
 WIDTH = 32
 HEIGHT = 24
 FRAME_SHAPE = (HEIGHT, WIDTH)
@@ -35,7 +30,7 @@ def warmUp():
 def getFrame():
     global LatestDetections
 
-    rawFrame = _grabber.getFrame()
+    rawFrame = getRawFrame()
     frameArray = convertFlatArray(rawFrame)
     LatestDetections = Pipeline.process_frame(frameArray)
 
