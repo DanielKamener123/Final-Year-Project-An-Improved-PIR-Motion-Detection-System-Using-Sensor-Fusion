@@ -45,3 +45,33 @@ def getDetections():
     each loop iteration.
     """
     return LatestDetections
+
+# Debugging
+
+# Current background array
+def getBackground():
+    return Pipeline.bg_model.bg
+
+# Current per pixel sigma
+def getSigma():
+    return Pipeline.bg_model.sigma
+
+# Pre Filtering Z Value
+def getRawZ():
+    return Pipeline.last_raw_z
+
+# Filtered Z Value
+def getSmoothedZ():
+    return Pipeline.last_smoothed_z
+
+# Binary Mask
+def getMask():
+    return Pipeline._prev_mask
+
+# Threshold Value Used On The Most Recent Frame
+def getThreshold():
+    return Pipeline.last_threshold
+
+# Mean Background Temperature
+def getSceneTemp():
+    return Pipeline.last_scene_temp

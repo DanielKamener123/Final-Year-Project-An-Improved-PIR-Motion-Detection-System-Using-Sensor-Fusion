@@ -3,7 +3,7 @@ import busio
 import adafruit_mlx90640
 
 # Config
-I2C_FREQUENCY = 1000000  # 100 kHz
+I2C_FREQUENCY = 100000  # 100 kHz
 REFRESH_RATE = adafruit_mlx90640.RefreshRate.REFRESH_2_HZ
 
 # I2C bus

@@ -273,14 +273,19 @@ class ThermopilePipeline:
         self._prev_mask = np.zeros(frame_shape, dtype=bool)
         self._prev_blobs: list[Blob] = []
 
+        # Debug/introspection state -- last-frame intermediate arrays, kept
+        # around so external tools (e.g. a live display) can inspect the
+        # pipeline without recomputing anything.
+        self.last_raw_z = np.zeros(frame_shape)
+        self.last_smoothed_z = np.zeros(frame_shape)
+        self.last_threshold = fixed_threshold
+        self.last_scene_temp = 0.0
+
     # Get Background Without Human
     def warm_start(self, calibration_frames):
         self.bg_model.warm_start(calibration_frames)
 
     def process_frame(self, frame):
-        # Steps 1: Update Background + Sigma
-        self.bg_model.update(frame, self._prev_mask)
-
         # Step 2: Z Score
         z = self.bg_model.z_score(frame)
 
@@ -291,6 +296,9 @@ class ThermopilePipeline:
         scene_temp = self.bg_model.scene_temperature()
         threshold = compute_threshold(scene_temp)
         mask = apply_threshold(smoothed_z, threshold)
+
+        # Steps 1: Update Background + Sigma
+        self.bg_model.update(frame, mask)
 
         # Step 5: Blob extraction
         blobs = extract_blobs(mask)
@@ -307,5 +315,11 @@ class ThermopilePipeline:
         # Store Previous Info
         self._prev_mask = mask
         self._prev_blobs = blobs
+
+        # Store latest intermediates for external debug/display access
+        self.last_raw_z = z
+        self.last_smoothed_z = smoothed_z
+        self.last_threshold = threshold
+        self.last_scene_temp = scene_temp
 
         return results
