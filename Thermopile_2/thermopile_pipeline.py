@@ -17,14 +17,14 @@ filterMode = "reflect"
 
 # Threshold
 fixed_threshold = 3.0 # When not using adaptive thresholding
-use_adaptive_threshold: bool = False
+use_adaptive_threshold = False
 adaptive_coeffs = None # [a, b, c] TODO: Replace with proper coefficients
-adaptive_min_threshold: float = 1.5  # lower bound
-adaptive_max_threshold: float = 8.0  # upper bound
+adaptive_min_threshold = 1.5  # lower bound
+adaptive_max_threshold = 8.0  # upper bound
 
 # Blob extraction
 connectivity_8 = True
-min_blob_pixels: int = 1 # Blobs smaller than this are discarded
+min_blob_pixels = 1 # Blobs smaller than this are discarded
 
 # Feature scoring
 expected_max_z = 10.0         # contrast normalisation ceiling
@@ -43,10 +43,10 @@ aspect_ratio_max = 2.5
 max_expected_motion_px = 6.0  # per frame centroid displacement ceiling
 
 # Feature weights - must sum to 1.0 TODO: Replace with proper weights
-w_contrast: float = 0.35
-w_size: float = 0.25
-w_aspect: float = 0.20
-w_motion: float = 0.20
+w_contrast = 0.35
+w_size = 0.25
+w_aspect = 0.20
+w_motion = 0.20
 
 # Background Model Class
 class BackgroundModel:
@@ -64,6 +64,7 @@ class BackgroundModel:
 
     # Update Background
     def update(self, frame, foreground_mask):
+        #Inverts Foreground Mask To Get Background Mask
         update_mask = ~foreground_mask
 
         # Updates Background Where No Humans

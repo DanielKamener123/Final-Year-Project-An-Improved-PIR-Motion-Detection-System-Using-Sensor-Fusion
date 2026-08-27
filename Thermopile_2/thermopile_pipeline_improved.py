@@ -65,7 +65,6 @@ morph_dilation_iterations = 1
 # the original placeholder if use_geometric_range is False.
 # TODO: replace FOV/mounting values with calibrated figures for the
 # final Rock 4C+ mount (datasheet vertical FOV, measured height/tilt).
-use_geometric_range = True
 sensor_vertical_fov_deg = 110.0   # MLX90640 narrow-lens vertical FOV
 sensor_mount_height_m = 2.5      # sensor height above floor
 sensor_tilt_deg = 0.0            # 0 = pointed straight down; +ve tilts forward
@@ -102,6 +101,7 @@ class BackgroundModel:
 
     # Update Background
     def update(self, frame, foreground_mask):
+        #Inverts Foreground Mask To Get Background Mask
         update_mask = ~foreground_mask
 
         # Updates Background Where No Humans
@@ -126,14 +126,10 @@ class BackgroundModel:
 def gaussian_filter(z_grid):
     return ndimage.convolve(z_grid, gaussianKernel, mode=filterMode)
 
-# New: morphological cleanup of the binary foreground mask
+# Cleanup The Foreground Binary Mask
 def morphological_cleanup(binary_mask):
-    eroded = ndimage.binary_erosion(
-        binary_mask, structure=morph_structure, iterations=morph_erosion_iterations
-    )
-    cleaned = ndimage.binary_dilation(
-        eroded, structure=morph_structure, iterations=morph_dilation_iterations
-    )
+    eroded = ndimage.binary_erosion(binary_mask, structure=morph_structure, iterations=morph_erosion_iterations)
+    cleaned = ndimage.binary_dilation(eroded, structure=morph_structure, iterations=morph_dilation_iterations)
     return cleaned
 
 # Thresholding 
@@ -215,21 +211,6 @@ class BlobFeatures:
     aspect_score: float
     motion_score: float
 
-# TODO: Replace with proper range to pixel count
-def _estimate_expected_pixels_legacy(centroid_row, frame_rows):
-    """
-    Rough range estimate from vertical position in frame, mapped through
-    the size_lookup table. Replace this mapping with your actual mounting
-    geometry once characterised -- this is a placeholder linear mapping
-    from "row position" to "range" before the pixel-count lookup.
-    """
-    # naive placeholder: assume top row = farthest, bottom row = nearest
-    frac = centroid_row / max(frame_rows - 1, 1)
-    ranges = size_lookup[:, 0]
-    range_m = ranges[0] + frac * (ranges[-1] - ranges[0])
-    expected_pixels = np.interp(range_m, size_lookup[:, 0], size_lookup[:, 1])
-    return float(expected_pixels)
-
 # New: pinhole/FOV geometric range model, replacing the linear placeholder.
 # Converts a pixel row into an elevation angle from the sensor's optical
 # axis (using the vertical FOV), then into a ground-plane range via simple
@@ -252,9 +233,7 @@ def _estimate_expected_pixels_geometric(centroid_row, frame_rows):
 # score_blob below needs no changes. Selects geometric or legacy mapping
 # based on the use_geometric_range config flag.
 def _estimate_expected_pixels(centroid_row, frame_rows):
-    if use_geometric_range:
-        return _estimate_expected_pixels_geometric(centroid_row, frame_rows)
-    return _estimate_expected_pixels_legacy(centroid_row, frame_rows)
+    return _estimate_expected_pixels_geometric(centroid_row, frame_rows)
 
 def score_blob(blob, smoothed_z, frame_shape, prev_centroid):
     # Feature 1: contrast
