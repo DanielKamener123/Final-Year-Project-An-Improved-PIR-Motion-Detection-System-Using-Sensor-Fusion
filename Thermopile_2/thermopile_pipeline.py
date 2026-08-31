@@ -150,7 +150,7 @@ class BlobFeatures:
 # Checks Blobs Displacement From Previous Frame
 def score_blob(blob, prev_centroid):
     if prev_centroid is None:
-        motion_score = 0.5  # neutral: no prior frame to compare against
+        motion_score = 0.5  # No prior frame to compare against
     else:
         # Gets Change in X and Y Of Previous Blob Centroid
         dr = blob.centroid[0] - prev_centroid[0]
@@ -242,7 +242,7 @@ class ThermopilePipeline:
         self._prev_mask = mask
         self._prev_blobs = blobs
 
-        # Store latest intermediates for external debug/display access
+        # Store Latest Intermediates For Display Access
         self.last_raw_z = z
         self.last_smoothed_z = smoothed_z
         self.last_threshold = threshold
