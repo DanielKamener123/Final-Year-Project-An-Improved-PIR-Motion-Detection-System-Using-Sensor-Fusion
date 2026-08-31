@@ -27,26 +27,9 @@ connectivity_8 = True
 min_blob_pixels = 1 # Blobs smaller than this are discarded
 
 # Feature scoring
-expected_max_z = 10.0         # contrast normalisation ceiling
-# TODO: Replace with proper range to pixel count
-size_lookup = np.array([
-    [1.0, 30.0],
-    [2.0, 14.0],
-    [3.0, 7.0],
-    [4.0, 4.0],
-    [5.0, 2.0],
-])
-aspect_ratio_min = 0.5
-aspect_ratio_max = 2.5
-
 # TODO: Replace with proper motion parameters
 max_expected_motion_px = 6.0  # per frame centroid displacement ceiling
-
-# Feature weights - must sum to 1.0 TODO: Replace with proper weights
-w_contrast = 0.35
-w_size = 0.25
-w_aspect = 0.20
-w_motion = 0.20
+max_match_distance = max_expected_motion_px * 1.5 
 
 # Background Model Class
 class BackgroundModel:
@@ -127,7 +110,6 @@ class Blob:
     bbox: tuple[int, int, int, int]   # (min_row, min_col, max_row, max_col)
     mask: np.ndarray                  
 
-
 # Extract Blobs
 def extract_blobs(binary_mask):
     if connectivity_8:
@@ -163,78 +145,30 @@ def extract_blobs(binary_mask):
 # Blob Feature Scoring
 @dataclass
 class BlobFeatures:
-    contrast: float
-    size_score: float
-    aspect_score: float
     motion_score: float
 
-# TODO: Replace with proper range to pixel count
-def _estimate_expected_pixels(centroid_row, frame_rows):
-    """
-    Rough range estimate from vertical position in frame, mapped through
-    the size_lookup table. Replace this mapping with your actual mounting
-    geometry once characterised -- this is a placeholder linear mapping
-    from "row position" to "range" before the pixel-count lookup.
-    """
-    # naive placeholder: assume top row = farthest, bottom row = nearest
-    frac = centroid_row / max(frame_rows - 1, 1)
-    ranges = size_lookup[:, 0]
-    range_m = ranges[0] + frac * (ranges[-1] - ranges[0])
-    expected_pixels = np.interp(range_m, size_lookup[:, 0], size_lookup[:, 1])
-    return float(expected_pixels)
-
-def score_blob(blob, smoothed_z, frame_shape, prev_centroid):
-    # Feature 1: contrast
-    peak_z = float(np.max(smoothed_z[blob.mask]))
-    contrast_score = min(peak_z / expected_max_z, 1.0)
-
-    # Feature 2: Size at Range
-    expected_pixels = _estimate_expected_pixels(blob.centroid[0], frame_shape[0])
-    if expected_pixels > 0:
-        size_score = 1.0 - abs(blob.pixel_count - expected_pixels) / expected_pixels
-        size_score = max(size_score, 0.0)
-    else:
-        size_score = 0.0
-
-    # Feature 3: Aspect Ratio
-    min_row, min_col, max_row, max_col = blob.bbox
-    height = max_row - min_row + 1
-    width = max_col - min_col + 1
-    aspect_ratio = height / width if width > 0 else 0.0
-    if aspect_ratio_min <= aspect_ratio <= aspect_ratio_max:
-        aspect_score = 1.0
-    else:
-        # linear fall-off outside the plausible band
-        if aspect_ratio < aspect_ratio_min:
-            dist = aspect_ratio_min - aspect_ratio
-        else:
-            dist = aspect_ratio - aspect_ratio_max
-        aspect_score = max(1.0 - dist, 0.0)
-
-    # Feature 4: centroid motion vs previous frame's matched blob
+# Checks Blobs Displacement From Previous Frame
+def score_blob(blob, prev_centroid):
     if prev_centroid is None:
         motion_score = 0.5  # neutral: no prior frame to compare against
     else:
+        # Gets Change in X and Y Of Previous Blob Centroid
         dr = blob.centroid[0] - prev_centroid[0]
         dc = blob.centroid[1] - prev_centroid[1]
         displacement = float(np.hypot(dr, dc))
-        # simple bell-shaped preference: some motion good, too much or
-        # none is penalised -- tune against real walking-speed data
+
+        # Checks Motion By How Much A Person Is Expected To Have Moved In One Frame
         normalised = displacement / max_expected_motion_px
-        motion_score = max(1.0 - abs(normalised - 0.3), 0.0)
+
+        # Computes Motion Score Based On How Close To Expected Motion The Blob Is
+        motion_score = max(1.0 - abs(normalised - 0.3) / 0.3, 0.0)
 
     return BlobFeatures(
-        contrast=contrast_score,
-        size_score=size_score,
-        aspect_score=aspect_score,
         motion_score=motion_score,
     )
 
+# Finds Closest Blobs From Previous Frame
 def match_previous_blob(blob, prev_blobs, max_match_distance):
-    """
-    Nearest-centroid matching against the previous frame's blobs, used to
-    feed prev_centroid into score_blob for the motion feature.
-    """
     if not prev_blobs:
         return None
 
@@ -252,13 +186,7 @@ def match_previous_blob(blob, prev_blobs, max_match_distance):
 
 # Confidence score
 def compute_confidence(features):
-    confidence = (
-        w_contrast * features.contrast
-        + w_size * features.size_score
-        + w_aspect * features.aspect_score
-        + w_motion * features.motion_score
-    )
-    return float(np.clip(confidence, 0.0, 1.0))
+    return float(np.clip(features.motion_score, 0.0, 1.0))
 
 # Pipeline
 @dataclass
@@ -274,9 +202,7 @@ class ThermopilePipeline:
         self._prev_mask = np.zeros(frame_shape, dtype=bool)
         self._prev_blobs: list[Blob] = []
 
-        # Debug/introspection state -- last-frame intermediate arrays, kept
-        # around so external tools (e.g. a live display) can inspect the
-        # pipeline without recomputing anything.
+        # Debug state
         self.last_raw_z = np.zeros(frame_shape)
         self.last_smoothed_z = np.zeros(frame_shape)
         self.last_threshold = fixed_threshold
@@ -306,10 +232,9 @@ class ThermopilePipeline:
 
         # Steps 6-7: Feature scoring + Confidence Per Blob
         results = []
-        max_match_distance = max_expected_motion_px * 1.5
         for blob in blobs:
             prev_centroid = match_previous_blob(blob, self._prev_blobs, max_match_distance)
-            features = score_blob(blob, smoothed_z, self.frame_shape, prev_centroid)
+            features = score_blob(blob, prev_centroid)
             confidence = compute_confidence(features)
             results.append(DetectionResult(blob=blob, features=features, confidence=confidence))
 
