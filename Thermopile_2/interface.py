@@ -6,8 +6,11 @@ import adafruit_mlx90640
 I2C_FREQUENCY = 100000  # 100 kHz
 REFRESH_RATE = adafruit_mlx90640.RefreshRate.REFRESH_2_HZ
 
-# I2C bus
+# I2C bus - ROCK 4C+ Pins 3 and 5
+# Pin 3 = SDA
+# Pin 5 = SCL
 i2c = busio.I2C(board.SCL, board.SDA, frequency=I2C_FREQUENCY)
+
 mlx = adafruit_mlx90640.MLX90640(i2c)
 mlx.refresh_rate = REFRESH_RATE
 
