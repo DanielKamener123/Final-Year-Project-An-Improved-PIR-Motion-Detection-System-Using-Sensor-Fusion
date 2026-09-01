@@ -3,7 +3,7 @@ import adafruit_extended_bus
 
 # Config
 I2C_BUS = 7
-REFRESH_RATE = adafruit_mlx90640.RefreshRate.REFRESH_2_HZ
+REFRESH_RATE = adafruit_mlx90640.RefreshRate.REFRESH_4_HZ
 
 i2c = adafruit_extended_bus.ExtendedI2C(I2C_BUS)
 
