@@ -44,6 +44,12 @@ def flat_to_grid(flat_frame):
     return [flat_frame[row * WIDTH:(row + 1) * WIDTH] for row in range(HEIGHT)]
 
 
+def _format_value(value):
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    return str(value)
+
+
 class DebugDashboard:
     def __init__(self):
         self.paused = False
@@ -75,12 +81,21 @@ class DebugDashboard:
 
             zeros = [[0] * WIDTH for _ in range(HEIGHT)]
             if kind == "raw" or kind == "background":
-                image = ax.imshow(zeros, cmap="inferno",
-                                   vmin=DISPLAY_MIN_TEMP, vmax=DISPLAY_MAX_TEMP)
+                image = ax.imshow(
+                    zeros,
+                    cmap="inferno",
+                    vmin=DISPLAY_MIN_TEMP,
+                    vmax=DISPLAY_MAX_TEMP,
+                )
             elif kind == "mask":
                 image = ax.imshow(zeros, cmap="gray", vmin=0, vmax=1)
             else:  # raw_z, smoothed_z
-                image = ax.imshow(zeros, cmap="viridis", vmin=0, vmax=Z_DISPLAY_MAX)
+                image = ax.imshow(
+                    zeros,
+                    cmap="viridis",
+                    vmin=0,
+                    vmax=Z_DISPLAY_MAX,
+                )
 
             self.images_by_kind[kind] = image
             ax.set_xticks([])
@@ -164,16 +179,34 @@ class DebugDashboard:
             box_height = max_row - min_row + 1
 
             rect = patches.Rectangle(
-                (min_col - 0.5, min_row - 0.5), box_width, box_height,
-                linewidth=1.5, edgecolor="cyan", facecolor="none",
+                (min_col - 0.5, min_row - 0.5),
+                box_width,
+                box_height,
+                linewidth=1.5,
+                edgecolor="cyan",
+                facecolor="none",
             )
             ax.add_patch(rect)
             self._overlay_artists.append(rect)
 
+            # Use confidence if it exists, otherwise use track ID if available.
+            confidence = getattr(result, "confidence", None)
+            track_id = getattr(getattr(result, "features", None), "track_id", None)
+
+            if confidence is not None:
+                label_text = f"{confidence:.2f}"
+            elif track_id is not None:
+                label_text = f"ID {track_id}"
+            else:
+                label_text = "Blob"
+
             label = ax.text(
-                min_col - 0.5, min_row - 1.0,
-                f"{result.confidence:.2f}",
-                color="cyan", fontsize=8, fontweight="bold",
+                min_col - 0.5,
+                min_row - 1.0,
+                label_text,
+                color="cyan",
+                fontsize=8,
+                fontweight="bold",
             )
             self._overlay_artists.append(label)
 
@@ -186,14 +219,55 @@ class DebugDashboard:
             f"Detections:  {len(detections)}",
             "",
         ]
+
         for i, result in enumerate(detections):
-            f_ = result.features
-            lines.append(f"Blob {i}: conf={result.confidence:.2f}")
-            lines.append(f"  contrast={f_.contrast:.2f} size={f_.size_score:.2f} "
-                          f"aspect={f_.aspect_score:.2f} motion={f_.motion_score:.2f}")
-            lines.append(f"  centroid=({result.blob.centroid[0]:.1f},"
-                          f"{result.blob.centroid[1]:.1f}) "
-                          f"px={result.blob.pixel_count} bbox={result.blob.bbox}")
+            lines.append(f"Blob {i}:")
+
+            confidence = getattr(result, "confidence", None)
+            if confidence is not None:
+                lines.append(f"  confidence={confidence:.2f}")
+
+            blob = getattr(result, "blob", None)
+            if blob is not None:
+                centroid = getattr(blob, "centroid", None)
+                pixel_count = getattr(blob, "pixel_count", None)
+                bbox = getattr(blob, "bbox", None)
+
+                if centroid is not None:
+                    lines.append(
+                        f"  centroid=({centroid[0]:.1f},{centroid[1]:.1f})"
+                    )
+                if pixel_count is not None:
+                    lines.append(f"  pixels={pixel_count}")
+                if bbox is not None:
+                    lines.append(f"  bbox={bbox}")
+
+            features = getattr(result, "features", None)
+            if features is None:
+                continue
+
+            # Display whatever fields the current BlobFeatures class contains.
+            if hasattr(features, "__dict__"):
+                feature_items = vars(features).items()
+            else:
+                feature_items = []
+
+            for name, value in feature_items:
+                if name.startswith("_"):
+                    continue
+
+                if isinstance(value, (int, float, str, bool)):
+                    lines.append(f"  {name}={_format_value(value)}")
+                elif (
+                    isinstance(value, (tuple, list))
+                    and len(value) <= 4
+                    and all(isinstance(v, (int, float)) for v in value)
+                ):
+                    formatted = ", ".join(_format_value(v) for v in value)
+                    lines.append(f"  {name}=({formatted})")
+
+            lines.append("")
+
         self.stats_text.set_text("\n".join(lines))
 
     def update(self, _frame_number):
@@ -228,7 +302,11 @@ class DebugDashboard:
 
         self._update_stats_text(detections)
 
-        artists = list(self.images_by_kind.values()) + self._overlay_artists + [self.stats_text]
+        artists = (
+            list(self.images_by_kind.values())
+            + self._overlay_artists
+            + [self.stats_text]
+        )
         return artists
 
 
@@ -240,7 +318,11 @@ def main():
     print(HELP_TEXT)
 
     ani = animation.FuncAnimation(
-        dashboard.fig, dashboard.update, interval=100, blit=False,
+        dashboard.fig,
+        dashboard.update,
+        interval=100,
+        blit=False,
+        cache_frame_data=False,
     )
     plt.show()
     return ani  # keep a reference alive for interactive use
