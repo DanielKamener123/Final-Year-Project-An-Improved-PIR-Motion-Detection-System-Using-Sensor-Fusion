@@ -1,0 +1,3 @@
+Current TODO List:
+- Configure Adaptive Threshold
+- Configure Max Match Distance

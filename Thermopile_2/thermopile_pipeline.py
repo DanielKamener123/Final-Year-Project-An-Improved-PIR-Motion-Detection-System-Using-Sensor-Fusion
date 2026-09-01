@@ -28,8 +28,7 @@ min_blob_pixels = 1 # Blobs smaller than this are discarded
 
 # Feature scoring
 # TODO: Replace with proper motion parameters
-max_expected_motion_px = 6.0  # per frame centroid displacement ceiling
-max_match_distance = max_expected_motion_px * 1.5
+max_match_distance = 6 * 1.5
 max_missed_frames = 2
 
 # Background Model Class
