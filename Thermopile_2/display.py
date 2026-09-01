@@ -13,24 +13,22 @@ from processing import (
 WIDTH = 32
 HEIGHT = 24
 
-# Fixed color scale range in degrees C -- adjust to suit your
-# expected background/target temperature range.
+# Colour Scale
 DISPLAY_MIN_TEMP = 15
 DISPLAY_MAX_TEMP = 40
 
-# Fixed color scale for Z-score panels, so frame-to-frame contrast is
-# visually comparable rather than auto-scaling every frame.
+# Fixed Color Scale For Z Score 
 Z_DISPLAY_MAX = 10.0
 
 # Panels, in the order they occupy the 2x3 grid. 'key' is the number
 # key that focuses/unfocuses that panel to fill the whole figure.
 PANEL_DEFS = [
-    {"key": "1", "kind": "raw", "title": "Raw Frame (+ detections)"},
+    {"key": "1", "kind": "raw", "title": "Raw Frame And Detections)"},
     {"key": "2", "kind": "background", "title": "Background Model"},
     {"key": "3", "kind": "mask", "title": "Foreground Mask"},
-    {"key": "4", "kind": "raw_z", "title": "Raw Z-Score"},
-    {"key": "5", "kind": "smoothed_z", "title": "Smoothed Z-Score"},
-    {"key": "6", "kind": "stats", "title": "Stats / Blob Info"},
+    {"key": "4", "kind": "raw_z", "title": "Z Score"},
+    {"key": "5", "kind": "smoothed_z", "title": "Filtered Z Score"},
+    {"key": "6", "kind": "stats", "title": "Stats"},
 ]
 
 HELP_TEXT = (
@@ -38,12 +36,12 @@ HELP_TEXT = (
     "[w] re-warm background   [s] save frame snapshot   [q] quit"
 )
 
-
+# Converts 1D Array To 2D Array
 def flat_to_grid(flat_frame):
     """Convert a flat 768-element list into a 24x32 list of lists."""
     return [flat_frame[row * WIDTH:(row + 1) * WIDTH] for row in range(HEIGHT)]
 
-
+# Format Values For Displaying
 def _format_value(value):
     if isinstance(value, float):
         return f"{value:.2f}"
@@ -193,10 +191,12 @@ class DebugDashboard:
             confidence = getattr(result, "confidence", None)
             track_id = getattr(getattr(result, "features", None), "track_id", None)
 
-            if confidence is not None:
-                label_text = f"{confidence:.2f}"
+            if track_id is not None and confidence is not None:
+                label_text = f"ID {track_id}  {confidence:.2f}"
             elif track_id is not None:
                 label_text = f"ID {track_id}"
+            elif confidence is not None:
+                label_text = f"{confidence:.2f}"
             else:
                 label_text = "Blob"
 
@@ -247,24 +247,62 @@ class DebugDashboard:
                 continue
 
             # Display whatever fields the current BlobFeatures class contains.
-            if hasattr(features, "__dict__"):
-                feature_items = vars(features).items()
-            else:
-                feature_items = []
+            track_id = getattr(features, "track_id", None)
+            virtual_position_x = getattr(features, "virtual_position_x", None)
+            horizontal_pixels_traversed = getattr(features, "horizontal_pixels_traversed", None)
+            vertical_pixels_traversed = getattr(features, "vertical_pixels_traversed", None)
+            horizontal_pixels_covered = getattr(features, "horizontal_pixels_covered", None)
+            vertical_pixels_covered = getattr(features, "vertical_pixels_covered", None)
+            horizontal_direction = getattr(features, "horizontal_direction", None)
+            vertical_direction = getattr(features, "vertical_direction", None)
 
-            for name, value in feature_items:
-                if name.startswith("_"):
-                    continue
+            if track_id is not None:
+                lines.append(f"  track_id={track_id}")
 
-                if isinstance(value, (int, float, str, bool)):
-                    lines.append(f"  {name}={_format_value(value)}")
-                elif (
-                    isinstance(value, (tuple, list))
-                    and len(value) <= 4
-                    and all(isinstance(v, (int, float)) for v in value)
-                ):
-                    formatted = ", ".join(_format_value(v) for v in value)
-                    lines.append(f"  {name}=({formatted})")
+            if virtual_position_x is not None:
+                lines.append(f"  virtual_position_x={virtual_position_x:.2f}")
+
+            if horizontal_pixels_traversed is not None:
+                lines.append(
+                    f"  horizontal_pixels_traversed={horizontal_pixels_traversed:.2f}"
+                )
+
+            if vertical_pixels_traversed is not None:
+                lines.append(
+                    f"  vertical_pixels_traversed={vertical_pixels_traversed:.2f}"
+                )
+
+            if horizontal_pixels_covered is not None:
+                lines.append(
+                    f"  horizontal_pixels_covered={horizontal_pixels_covered}"
+                )
+
+            if vertical_pixels_covered is not None:
+                lines.append(
+                    f"  vertical_pixels_covered={vertical_pixels_covered}"
+                )
+
+            if horizontal_direction is not None:
+                horizontal_direction_text = {
+                    -1: "left",
+                    0: "stationary",
+                    1: "right",
+                }.get(horizontal_direction, str(horizontal_direction))
+
+                lines.append(
+                    f"  horizontal_direction={horizontal_direction_text}"
+                )
+
+            if vertical_direction is not None:
+                vertical_direction_text = {
+                    -1: "up",
+                    0: "stationary",
+                    1: "down",
+                }.get(vertical_direction, str(vertical_direction))
+
+                lines.append(
+                    f"  vertical_direction={vertical_direction_text}"
+                )
 
             lines.append("")
 

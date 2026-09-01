@@ -29,7 +29,8 @@ min_blob_pixels = 1 # Blobs smaller than this are discarded
 # Feature scoring
 # TODO: Replace with proper motion parameters
 max_expected_motion_px = 6.0  # per frame centroid displacement ceiling
-max_match_distance = max_expected_motion_px * 1.5 
+max_match_distance = max_expected_motion_px * 1.5
+max_missed_frames = 2
 
 # Background Model Class
 class BackgroundModel:
@@ -142,58 +143,152 @@ def extract_blobs(binary_mask):
 
     return blobs
 
+@dataclass
+class Track:
+    id: int
+    centroid: tuple[float, float]
+    age_frames: int
+    cumulative_displacement_px: float
+    horizontal_pixels_traversed: float = 0.0
+    vertical_pixels_traversed: float = 0.0
+    missed_frames: int = 0
+
 # Blob Feature Scoring
 @dataclass
 class BlobFeatures:
-    motion_score: float
+    track_id: int
+    centroid: tuple[float, float]
+
+    pixel_count: int
+    width: int
+    height: int
+
+    row_displacement: float
+    col_displacement: float
+    displacement_px: float
+    normalised_displacement: float
+
+    track_age_frames: int
+    cumulative_displacement_px: float
+
+    mean_temperature_difference: float
+    max_temperature_difference: float
+
+    virtual_position_x: float
+    horizontal_pixels_traversed: float
+    vertical_pixels_traversed: float
+    horizontal_pixels_covered: int
+    vertical_pixels_covered: int
+    horizontal_direction: int
+    vertical_direction: int
 
 # Checks Blobs Displacement From Previous Frame
-def score_blob(blob, prev_centroid):
-    if prev_centroid is None:
-        motion_score = 0.5  # No prior frame to compare against
+def score_blob(blob, track, temperature_difference):
+    min_row, min_col, max_row, max_col = blob.bbox
+
+    # Determine Height and Width of Blob Bounding Box
+    width = max_col - min_col + 1
+    height = max_row - min_row + 1
+
+    # If There Is No Previous Blob, Set Displacement To 0
+    if track is None:
+        row_displacement = 0.0
+        col_displacement = 0.0
+        displacement = 0.0
+        normalised_displacement = 0.0
+        track_age_frames = 1
+        cumulative_displacement = 0.0
+        track_id = -1
     else:
         # Gets Change in X and Y Of Previous Blob Centroid
-        dr = blob.centroid[0] - prev_centroid[0]
-        dc = blob.centroid[1] - prev_centroid[1]
-        displacement = float(np.hypot(dr, dc))
+        row_displacement = blob.centroid[0] - track.centroid[0]
+        col_displacement = blob.centroid[1] - track.centroid[1]
+        displacement = float(np.hypot(row_displacement, col_displacement))
 
         # Checks Motion By How Much A Person Is Expected To Have Moved In One Frame
-        normalised = displacement / max_expected_motion_px
+        normalised_displacement = displacement / max(height, 1)
 
-        # Computes Motion Score Based On How Close To Expected Motion The Blob Is
-        motion_score = max(1.0 - abs(normalised - 0.3) / 0.3, 0.0)
+        track_age_frames = track.age_frames + 1
+        cumulative_displacement = track.cumulative_displacement_px + displacement
+        track_id = track.id
+
+    # Get Temperature Difference For Blob
+    blob_temperature_difference = temperature_difference[blob.mask]
+
+    # Get Mean and Max Temperature Difference For Blob
+    mean_temperature_difference = float(np.mean(blob_temperature_difference))
+    max_temperature_difference = float(np.max(blob_temperature_difference))
+
+    # Get X Centroid
+    virtual_position_x = float(blob.centroid[1])
+
+    # Get Pixels Travelled
+    horizontal_pixels_traversed = track.horizontal_pixels_traversed + abs(col_displacement)
+    vertical_pixels_traversed = track.vertical_pixels_traversed + abs(row_displacement)
+
+    # Get Pixels Covered
+    horizontal_pixels_covered = width
+    vertical_pixels_covered = height
+
+    # Get Direction Of Motion
+    horizontal_direction = int(np.sign(col_displacement))
+    vertical_direction = int(np.sign(row_displacement))
 
     return BlobFeatures(
-        motion_score=motion_score,
+        track_id=track_id,
+        centroid=blob.centroid,
+
+        pixel_count=blob.pixel_count,
+        width=width,
+        height=height,
+
+        row_displacement=row_displacement,
+        col_displacement=col_displacement,
+        displacement_px=displacement,
+        normalised_displacement=normalised_displacement,
+
+        track_age_frames=track_age_frames,
+        cumulative_displacement_px=cumulative_displacement,
+
+        mean_temperature_difference=mean_temperature_difference,
+        max_temperature_difference=max_temperature_difference,
+
+        virtual_position_x=virtual_position_x,
+        horizontal_pixels_traversed=horizontal_pixels_traversed,
+        vertical_pixels_traversed=vertical_pixels_traversed,
+        horizontal_pixels_covered=horizontal_pixels_covered,
+        vertical_pixels_covered=vertical_pixels_covered,
+        horizontal_direction=horizontal_direction,
+        vertical_direction=vertical_direction,
     )
 
 # Finds Closest Blobs From Previous Frame
-def match_previous_blob(blob, prev_blobs, max_match_distance):
-    if not prev_blobs:
+def match_previous_blob(blob, tracks, used_track_ids, max_match_distance):
+    if not tracks:
         return None
 
     best_dist = None
-    best_centroid = None
-    for pb in prev_blobs:
-        dr = blob.centroid[0] - pb.centroid[0]
-        dc = blob.centroid[1] - pb.centroid[1]
+    best_track = None
+
+    for track in tracks.values():
+        if track.id in used_track_ids:
+            continue
+
+        dr = blob.centroid[0] - track.centroid[0]
+        dc = blob.centroid[1] - track.centroid[1]
         dist = float(np.hypot(dr, dc))
+
         if dist <= max_match_distance and (best_dist is None or dist < best_dist):
             best_dist = dist
-            best_centroid = pb.centroid
+            best_track = track
 
-    return best_centroid
-
-# Confidence score
-def compute_confidence(features):
-    return float(np.clip(features.motion_score, 0.0, 1.0))
+    return best_track
 
 # Pipeline
 @dataclass
 class DetectionResult:
     blob: Blob
     features: BlobFeatures
-    confidence: float
 
 class ThermopilePipeline:
     def __init__(self, frame_shape):
@@ -201,6 +296,9 @@ class ThermopilePipeline:
         self.bg_model = BackgroundModel(frame_shape)
         self._prev_mask = np.zeros(frame_shape, dtype=bool)
         self._prev_blobs: list[Blob] = []
+
+        self._tracks: dict[int, Track] = {}
+        self._next_track_id = 1
 
         # Debug state
         self.last_raw_z = np.zeros(frame_shape)
@@ -224,19 +322,74 @@ class ThermopilePipeline:
         threshold = compute_threshold(scene_temp)
         mask = apply_threshold(smoothed_z, threshold)
 
+        temperature_difference = np.abs(frame - self.bg_model.bg)
+
         # Steps 1: Update Background + Sigma
         self.bg_model.update(frame, mask)
 
         # Step 5: Blob extraction
         blobs = extract_blobs(mask)
 
-        # Steps 6-7: Feature scoring + Confidence Per Blob
+        # Step 6: Feature Extraction variables
         results = []
+        used_track_ids = set()
+        updated_tracks = {}
+
+        # Step 6: Feature Extraction For Each Blob
         for blob in blobs:
-            prev_centroid = match_previous_blob(blob, self._prev_blobs, max_match_distance)
-            features = score_blob(blob, prev_centroid)
-            confidence = compute_confidence(features)
-            results.append(DetectionResult(blob=blob, features=features, confidence=confidence))
+            # Track Blob To Blob From Previous Frame
+            track = match_previous_blob(
+                blob,
+                self._tracks,
+                used_track_ids,
+                max_match_distance
+            )
+
+            # If There Is No Previous Blob, Create New Track
+            if track is None:
+                track = Track(
+                    id=self._next_track_id,
+                    centroid=blob.centroid,
+                    age_frames=0,
+                    cumulative_displacement_px=0.0,
+                    horizontal_pixels_traversed=0.0,
+                    vertical_pixels_traversed=0.0,
+                )
+
+                self._next_track_id += 1
+
+            # Extract The Features Of The Blob
+            features = score_blob(blob, track, temperature_difference)
+
+            features.track_id = track.id
+
+            # Update Data From Tracked Blob
+            updated_tracks[track.id] = Track(
+                id=track.id,
+                centroid=blob.centroid,
+                age_frames=features.track_age_frames,
+                cumulative_displacement_px=features.cumulative_displacement_px,
+                horizontal_pixels_traversed=features.horizontal_pixels_traversed,
+                vertical_pixels_traversed=features.vertical_pixels_traversed,
+                missed_frames=0,
+            )
+
+            used_track_ids.add(track.id)
+
+            # Store The Result For This Blob
+            results.append(DetectionResult(blob=blob,features=features))
+
+        # Remove Tracks That Do Not Appear For More Than max_missed_frames
+        for track_id, track in self._tracks.items():
+            if track_id in used_track_ids:
+                continue
+
+            track.missed_frames += 1
+
+            if track.missed_frames <= max_missed_frames:
+                updated_tracks[track_id] = track
+
+        self._tracks = updated_tracks
 
         # Store Previous Info
         self._prev_mask = mask
