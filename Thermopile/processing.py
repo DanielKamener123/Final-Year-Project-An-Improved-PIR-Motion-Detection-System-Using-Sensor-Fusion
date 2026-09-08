@@ -1,135 +1,77 @@
-from interface import getFrame as getRawFrame
 import numpy as np
 
-ALPHA = 0.99
-THRESHOLD = 0.6
-CONNECTIVITY_RULE = 8
+from Thermopile.interface import getFrame as getRawFrame
+from Thermopile.thermopile_pipeline import ThermopilePipeline
 
+WIDTH = 32
+HEIGHT = 24
+FRAME_SHAPE = (HEIGHT, WIDTH)
+
+N_WARMUP_FRAMES = 20
+
+Pipeline = ThermopilePipeline(frame_shape=FRAME_SHAPE)
+
+LatestDetections = []
+
+# Convert a 1D array into a 2D array.
+def convertFlatArray(flatFrame):
+    return np.array(flatFrame, dtype=np.float64).reshape(FRAME_SHAPE)
+
+# Captures frames to use as initialised background model
+def warmUp():
+    print(f"Warm up Starting - Make Sure No One Is In Frame")
+    calibrationFrames = np.empty((N_WARMUP_FRAMES, *FRAME_SHAPE), dtype=np.float64)
+    for i in range(N_WARMUP_FRAMES):
+        calibrationFrames[i] = convertFlatArray(getRawFrame())
+    Pipeline.warm_start(calibrationFrames)
+    print("Warm Up Complete")
+
+# Process Frame
 def getFrame():
-    rawFrame = np.array(getRawFrame()).reshape(24,32)
+    global LatestDetections
 
-    #return rawFrame
-    return getRawFrame()
+    rawFrame = getRawFrame()
+    frameArray = convertFlatArray(rawFrame)
+    LatestDetections = Pipeline.process_frame(frameArray)
 
-def updateBackground(background, current, sigma, mask):
-    # Update Running Background Average
-    newBackground = []
-    for i in range(0, 24):
-        newRow = []
-        for j in range(0,32):
-            # Only updates for background - doesnt update if human pixel
-            if mask[i][j] == 0:
-                newRow.append(((1 - ALPHA) * background[i][j]) + (ALPHA * current[i][j]))
-            else:
-                newRow.append(background[i][j])
-        newBackground.append(newRow)
+    return rawFrame
 
-    # Update Variance
-    newSigma = []
-    for i in range(0, 24):
-        newRow = []
-        for j in range(0,32):
-            #
-            if mask[i][j] == 0:
-                newRow.append(((1-ALPHA) * sigma[i][j]) + (ALPHA * np.square(background[i][j] - current[i][j])))
-            else:
-                newRow.append(sigma[i][j])
-        newSigma.append(newRow)
+# Return the list of DetectionResult from the most recently frame
+def getDetections():
+    """
+    Return the list of DetectionResult objects (blob, features,
+    confidence) from the most recently processed frame. Reflects
+    whatever frame getFrame() last returned -- call getFrame() first
+    each loop iteration.
+    """
+    return LatestDetections
 
-    return newBackground, newSigma
+# Debugging
 
-def foregroundExtraction(background, current, sigma):
-    # How many multiples of this pixels normal variation is present
-    Z = []
-    for i in range(0, 24):
-        item = []
-        for j in range(0,32):
-            item.append(np.abs(background[i][j] - current[i][j]) / sigma[i][j])
-        Z.append(item)
-    
-    return Z
+# Current background array
+def getBackground():
+    return Pipeline.bg_model.bg
 
-def spatialFilter(Z):
-    Z  = np.array(Z)
+# Current per pixel sigma
+def getSigma():
+    return Pipeline.bg_model.sigma
 
-    kernel = np.array([
-        [1,2,1],
-        [2,4,2],
-        [1,2,1]
-    ], dtype = np.float64) / 16.0
+# Pre Filtering Z Value
+def getRawZ():
+    return Pipeline.last_raw_z
 
-    return np.convolve(Z, kernel, mode='reflect')
+# Filtered Z Value
+def getSmoothedZ():
+    return Pipeline.last_smoothed_z
 
-def thresholding(filteredZ):
-    mask = []
-    for i in range(0,24):
-        row = []
-        for j in range(0,32):
-            if filteredZ[i][j] > THRESHOLD:
-                row.append(1)
-            else:
-                row.append(0)
-        mask.append(row)
+# Binary Mask
+def getMask():
+    return Pipeline._prev_mask
 
-    return mask
+# Threshold Value Used On The Most Recent Frame
+def getThreshold():
+    return Pipeline.last_threshold
 
-# Uses flood fill
-def blobExtraction(mask):
-    visited = [[False] * 24 for i in range(32)]
-    labels = [[0] * 24 for i in range(32)]
-    nextLabel = 1
-
-    neighbours = [
-        [-1, -1], [-1, 0], [-1, 1],
-        [0, -1], [0, 1],
-        [1, -1], [1,0], [1,1]
-    ]
-
-    for i in mask:
-        for j in i:
-            # Make sure pixel is human and not already grouped
-            if mask[i][j] == 0:
-                continue
-            if visited[i][j]:
-                continue
-
-            # Make new blob
-            queue = [[i, j]]
-            visited[i][j] = True
-
-            while len(queue) != 0:
-                r, c = queue[0]
-                queue.pop(0)
-
-                labels[r][c] = nextLabel
-
-                for dr, dc in neighbours:
-                    nr = r + dr
-                    nc = c + dc
-
-                    if 0 <= nr < 24 and 0 <= nc < 32:
-                        if mask[nr, nc] == 1 and not visited[nr, nc]:
-                            visited[nr, nc] = True
-                            queue.append([nr, nc])
-
-            nextLabel += 1
-
-    # Determine pixel count and centroid of blobs
-    pixelCount = []
-    for i in range(0, nextLabel):
-        count = 0
-        for row in labels:
-            for pixel in row:
-                count += 1
-
-        pixelCount.append(count)
-
-    
-                    
-    return
-
-def processingPipeline():
-    rawFrame = getFrame()
-    return
-
-print(getFrame())
+# Mean Background Temperature
+def getSceneTemp():
+    return Pipeline.last_scene_temp

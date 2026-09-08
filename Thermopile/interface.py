@@ -1,25 +1,19 @@
-import board
-import busio
 import adafruit_mlx90640
+import adafruit_extended_bus
 
 # Config
-I2C_FREQUENCY = 1000000  # 100 kHz
-REFRESH_RATE = adafruit_mlx90640.RefreshRate.REFRESH_2_HZ
+I2C_BUS = 7
+REFRESH_RATE = adafruit_mlx90640.RefreshRate.REFRESH_4_HZ
 
-# I2C bus
-i2c = busio.I2C(board.SCL, board.SDA, frequency=I2C_FREQUENCY)
+i2c = adafruit_extended_bus.ExtendedI2C(I2C_BUS)
+
 mlx = adafruit_mlx90640.MLX90640(i2c)
 mlx.refresh_rate = REFRESH_RATE
 
-frame_buffer = [0.0] * 768  # 32 x 24, row-major
+frame_buffer = [0.0] * 768  # 32 x 24
 
-
+# Reads Frame From Thermopile
 def getFrame():
-    """
-    Block until a new frame is available, then return it as a flat
-    list of 768 temperatures in degrees Celsius (row-major, row 0 =
-    top of the sensor's field of view).
-    """
     while True:
         try:
             mlx.getFrame(frame_buffer)
@@ -32,6 +26,6 @@ def getFrame():
 
 
 if __name__ == "__main__":
-    # Simple standalone smoke test.
+    # Tests To Ensure Frame Is Being Read
     frame = getFrame()
-    print(f"Got frame with {len(frame)} pixels. min={min(frame):.2f}C max={max(frame):.2f}C")
+    print(frame)
