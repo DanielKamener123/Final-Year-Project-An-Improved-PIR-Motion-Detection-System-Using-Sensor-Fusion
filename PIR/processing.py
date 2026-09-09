@@ -1,26 +1,22 @@
 import threading
 import queue
-from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
 
-from PIR.interface import PIRInterfaceConfig, PIRAcquisition
+from PIR.interface import PIRAcquisition
 
+# Warm Up Time (seconds)
+warmupTime = 10.0
 
-@dataclass
-class PIRProcessingConfig:
-    # Warm Up Time (seconds)
-    warmupTime = 10.0
+# How Quickly System Adapts To Background Changes While System Is Idle 
+alpha = 0.01
 
-    # How Quickly System Adapts To Background Changes While System Is Idle 
-    alpha = 0.01
+# Threshold Relative To Background
+threshold = 0.2
 
-    # Threshold Relative To Background
-    threshold = 0.2
-
-    # Checks A Certain Time To See If Still Movement - Occurs When Inside Threshold
-    settleDownTime = 1.0
+# Checks A Certain Time To See If Still Movement - Occurs When Inside Threshold
+settleDownTime = 1.0
 
 
 # Determines Initial Signal Direction
@@ -37,9 +33,7 @@ class MovementState(Enum):
 
 
 class MovementSegmenter:
-    def __init__(self, config):
-        self.config = config
-
+    def __init__(self):
         # Baseline Voltage
         self.baselineVoltage = 0.0
 
@@ -66,8 +60,7 @@ class MovementSegmenter:
             self.baselineVoltage = v
             self.initialised = True
         else:
-            a = self.config.alpha
-            self.baselineVoltage = (1 - a) * self.baselineVoltage + a * v
+            self.baselineVoltage = (1 - alpha) * self.baselineVoltage + alpha * v
 
     # Warm Up
     def warmup(self, ts, v):
@@ -80,7 +73,7 @@ class MovementSegmenter:
         self.baselineVoltage += (v - self.baselineVoltage) / self.warmupCount
 
         # Check If Warm Up Is Done
-        if ts - self.warmupStartTime >= self.config.warmupTime:
+        if ts - self.warmupStartTime >= warmupTime:
             self.initialised = True
 
     def processSample(self, ts, v):
@@ -98,8 +91,8 @@ class MovementSegmenter:
             return None
 
         # Calculate Threshold Values
-        thresholdHigh = self.baselineVoltage + self.config.threshold
-        thresholdLow = self.baselineVoltage - self.config.threshold
+        thresholdHigh = self.baselineVoltage + threshold
+        thresholdLow = self.baselineVoltage - threshold
 
         # Check If Current Movement State Is Idle
         if self.state == MovementState.IDLE:
@@ -123,8 +116,8 @@ class MovementSegmenter:
             return None
 
         # Keep The Movement Baseline Thresholds Fixed Throughout Movement Event
-        thresholdHigh = self.movementBaseline + self.config.threshold
-        thresholdLow = self.movementBaseline - self.config.threshold
+        thresholdHigh = self.movementBaseline + threshold
+        thresholdLow = self.movementBaseline - threshold
 
         # Add New Sample To Movement Samples
         self.movementSamples.append((ts, v - self.movementBaseline))
@@ -145,7 +138,7 @@ class MovementSegmenter:
             return None
 
         # Checks If Settling Down Timer Is Done
-        if ts - self.settleStartTime >= self.config.settleDownTime:
+        if ts - self.settleStartTime >= settleDownTime:
             # Get The Completed Movement Samples - Not Including Settling Down Samples
             completed = [(t, x) for t, x in self.movementSamples if t <= self.lastActiveTime]
             direction = self.direction
@@ -194,31 +187,25 @@ def globalPeaks(samples):
     low = min(samples, key=lambda sample: sample[1])
     return sorted([high, low], key=lambda sample: sample[0])
 
-def getFeatureVector(samples, direction: Direction = Direction.UNKNOWN, config: PIRProcessingConfig = None):
+def getFeatureVector(samples, direction: Direction = Direction.UNKNOWN):
     # Error Checking
     if not samples:
         raise ValueError("Cannot extract features from an empty passage")
-    if config is None:
-        config = PIRProcessingConfig()
-    if not config.enable_peak_selection:
-        raise ValueError("Peak selection is required for the core feature vector")
 
     # Gets Feature Class
-    peaks = globalPeaks(samples, direction)
+    peaks = globalPeaks(samples)
     Vpp = max(v for _, v in peaks) - min(v for _, v in peaks)
     D = samples[-1][0] - samples[0][0]
     return np.array([Vpp, D], dtype=np.float64)
 
 # Processing Pipeline
 class PIRProcessor:
-    def __init__(self, config: PIRProcessingConfig, sampleQueue: queue.Queue):
-        self.config = config
-
+    def __init__(self, sampleQueue: queue.Queue):
         self.sampleQueue = sampleQueue
         self.featureQueue = queue.Queue()
         self.movementQueue = queue.Queue()
 
-        self.segmenter = MovementSegmenter(config)
+        self.segmenter = MovementSegmenter()
 
         self.workerThread = threading.Thread(target=self.run, daemon=True)
         self.stopEvent = threading.Event()
@@ -241,7 +228,7 @@ class PIRProcessor:
                 result = self.segmenter.processSample(ts, v)
                 if result is not None:
                     samples, direction, Ap, An = result
-                    vec = getFeatureVector(samples, direction, self.config)
+                    vec = getFeatureVector(samples, direction)
                     metadata = dict(self.segmenter.lastMovement)
                     metadata.update({"features": vec.copy(),
                                      "samples": list(samples),
@@ -259,11 +246,9 @@ class PIRProcessor:
 if __name__ == "__main__":
     sample_queue = queue.Queue(maxsize=2048)
 
-    interface_cfg = PIRInterfaceConfig()
-    acquisition = PIRAcquisition(interface_cfg, sample_queue)
+    acquisition = PIRAcquisition(sample_queue)
 
-    processing_cfg = PIRProcessingConfig()
-    processor = PIRProcessor(processing_cfg, sample_queue)
+    processor = PIRProcessor(sample_queue)
 
     print("PIR pipeline: [Vpp, D]")
     print("Keep the scene empty during background calibration.")
