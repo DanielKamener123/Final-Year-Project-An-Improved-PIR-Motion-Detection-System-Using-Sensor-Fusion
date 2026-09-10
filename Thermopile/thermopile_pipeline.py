@@ -16,7 +16,7 @@ gaussianKernel = np.array([
 filterMode = "reflect"
 
 # Threshold
-fixed_threshold = 3.0 # When not using adaptive thresholding
+fixed_threshold = 8.0 # When not using adaptive thresholding
 use_adaptive_threshold = False
 adaptive_coeffs = None # [a, b, c] TODO: Replace with proper coefficients
 adaptive_min_threshold = 1.5  # lower bound
