@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import matplotlib.patches as patches
 
-from processing import (
+from Thermopile.processing import (
     getFrame, getDetections, warmUp,
     getBackground, getSigma, getRawZ, getSmoothedZ, getMask,
     getThreshold, getSceneTemp,

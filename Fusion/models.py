@@ -1,12 +1,9 @@
-import numpy as np
 import pandas as pd
 
-from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.decomposition import PCA
-from sklearn.cross_decomposition import CCA
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
@@ -35,59 +32,6 @@ LABEL_COLUMN = "human"
 
 TRAIN_FILE = "train.csv"
 TEST_FILE = "test.csv"
-
-
-# Optional CCA feature transformation
-class CCAFeatures(BaseEstimator, TransformerMixin):
-
-    def __init__(
-        self,
-        thermal_indices,
-        pir_indices,
-        n_components=2
-    ):
-        self.thermal_indices = thermal_indices
-        self.pir_indices = pir_indices
-        self.n_components = n_components
-
-    def fit(self, X, y=None):
-
-        X_thermal = X[:, self.thermal_indices]
-        X_pir = X[:, self.pir_indices]
-
-        n_components = min(
-            self.n_components,
-            X_thermal.shape[1],
-            X_pir.shape[1],
-            X.shape[0] - 1
-        )
-
-        self.cca_ = CCA(
-            n_components=n_components,
-            scale=False,
-            max_iter=1000
-        )
-
-        self.cca_.fit(X_thermal, X_pir)
-
-        return self
-
-    def transform(self, X):
-
-        X_thermal = X[:, self.thermal_indices]
-        X_pir = X[:, self.pir_indices]
-
-        thermal_cca, pir_cca = self.cca_.transform(
-            X_thermal,
-            X_pir
-        )
-
-        # Keep original features as well as CCA features
-        return np.hstack([
-            X,
-            thermal_cca,
-            pir_cca
-        ])
 
 
 # Load datasets
@@ -126,6 +70,11 @@ if not set(y_test.unique()).issubset({0, 1}):
 
 
 # Preprocessing
+# Fusion combination step: PIR and thermopile feature columns arrive
+# already concatenated into one row per sample (feature-level fusion).
+# Rescaling both sensors onto a common scale here, before the classifier
+# sees them, is the chosen combination method -- it stops whichever
+# sensor happens to have larger raw numbers from dominating the model.
 scaled_preprocessing = [
     SimpleImputer(strategy="median"),
     StandardScaler()
@@ -218,36 +167,6 @@ models = {
         )
     )
 }
-
-
-# Optional CCA + SVM
-# Requires feature names such as:
-# thermal_area, thermal_motion, pir_energy, pir_amplitude
-
-thermal_indices = [
-    i for i, column in enumerate(X_train.columns)
-    if column.startswith("thermal_")
-]
-
-pir_indices = [
-    i for i, column in enumerate(X_train.columns)
-    if column.startswith("pir_")
-]
-
-if len(thermal_indices) >= 2 and len(pir_indices) >= 2:
-
-    models["CCA + RBF SVM"] = make_pipeline(
-        *scaled_preprocessing,
-        CCAFeatures(
-            thermal_indices=thermal_indices,
-            pir_indices=pir_indices,
-            n_components=2
-        ),
-        SVC(
-            kernel="rbf",
-            random_state=RANDOM_STATE
-        )
-    )
 
 
 # Train and test every algorithm

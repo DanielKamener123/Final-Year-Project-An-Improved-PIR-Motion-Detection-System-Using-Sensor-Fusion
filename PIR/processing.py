@@ -5,6 +5,7 @@ from enum import Enum
 import numpy as np
 
 from PIR.interface import PIRAcquisition
+from PIR.haar_features import getHaarFeatureVector
 
 # Warm Up Time (seconds)
 warmupTime = 10.0
@@ -179,24 +180,16 @@ def _find_local_extrema(samples):
             extrema.append((i, samples[i][0], samples[i][1], False))
     return extrema
 
-# Returns Positive and Negative Global Voltage Peak
-def globalPeaks(samples):
-    if not samples:
-        return []
-    high = max(samples, key=lambda sample: sample[1])
-    low = min(samples, key=lambda sample: sample[1])
-    return sorted([high, low], key=lambda sample: sample[0])
-
+# Haar-transform feature vector: the passage is padded/truncated to a
+# fixed-length block and decomposed into 8 frequency-band energies.
+# Replaces the previous single peak-to-peak/duration pair. See
+# PIR/haar_features.py for the transform itself.
 def getFeatureVector(samples, direction: Direction = Direction.UNKNOWN):
     # Error Checking
     if not samples:
         raise ValueError("Cannot extract features from an empty passage")
 
-    # Gets Feature Class
-    peaks = globalPeaks(samples)
-    Vpp = max(v for _, v in peaks) - min(v for _, v in peaks)
-    D = samples[-1][0] - samples[0][0]
-    return np.array([Vpp, D], dtype=np.float64)
+    return getHaarFeatureVector(samples)
 
 # Processing Pipeline
 class PIRProcessor:
@@ -250,7 +243,7 @@ if __name__ == "__main__":
 
     processor = PIRProcessor(sample_queue)
 
-    print("PIR pipeline: [Vpp, D]")
+    print("PIR pipeline: Haar transform, 8 frequency-band energies")
     print("Keep the scene empty during background calibration.")
     print("Threshold and settle-time defaults are not calibrated for this PCB.")
     acquisition.start()
