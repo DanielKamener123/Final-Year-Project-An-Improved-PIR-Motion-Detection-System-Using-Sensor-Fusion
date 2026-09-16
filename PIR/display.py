@@ -6,16 +6,20 @@ pipeline. Not part of the deployed system -- for verifying wiring, signal
 levels, threshold behaviour, and feature vectors during development.
 
 Shows:
-  - Scrolling raw waveform with the adaptive noise mean (Am) and detection
-    thresholds (Ap, An) overlaid.
-  - Latest Haar-Transform bin energies as a bar chart.
-  - Console printout of each completed passage's feature vector.
+  - Scrolling raw waveform with the background baseline and detection
+    thresholds overlaid.
+  - Live Haar-transform bin energies from the sliding window -- these
+    are recomputed on every plot update, so the bars always reflect the
+    signal right now, not just the most recently completed passage.
+  - Console printout of each completed passage's feature vector, plus
+    its duration and direction.
   - Diagnostics: achieved sample rate, and warnings if the signal is
     clipping near the 0 V / 3.3 V rails.
 
-Acquisition produces one sample stream; a tee thread duplicates it into two
-independent queues (one for the real PIRProcessor, one for this display)
-so plotting never steals samples the processor needs.
+Acquisition produces one sample stream; a tee thread duplicates it into
+three independent queues (the real PIRProcessor, the live sliding
+window, and this display) so plotting never steals samples the others
+need.
 """
 
 import queue
@@ -27,8 +31,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
-from interface import PIRInterfaceConfig, PIRAcquisition
-from processing import PIRProcessingConfig, PIRProcessor
+from PIR.interface import PIRAcquisition, i2cBusNumber, i2cAddress, sampleRateHz
+from PIR.processing import PIRProcessor, threshold
+from PIR.sliding_window import PIRSlidingWindow
 
 # --- signal rail limits for the 0-3.3 V PIR frontend output ---
 RAIL_LOW_V = 0.05
@@ -38,47 +43,46 @@ RAIL_HIGH_V = 3.25
 DISPLAY_WINDOW_S = 15.0
 
 
-def tee(source_q: queue.Queue, dest_a: queue.Queue, dest_b: queue.Queue, stop_event):
-    """Copies every item from source_q into both dest_a and dest_b."""
+def tee(source_q: queue.Queue, dest_queues, stop_event):
+    """Copies every item from source_q into every queue in dest_queues."""
     while not stop_event.is_set():
         try:
             item = source_q.get(timeout=0.5)
         except queue.Empty:
             continue
-        dest_a.put(item)
-        dest_b.put(item)
+        for dest in dest_queues:
+            dest.put(item)
 
 
 def main():
-    interface_cfg = PIRInterfaceConfig()
-    processing_cfg = PIRProcessingConfig()
-
     acq_queue = queue.Queue(maxsize=4096)
     processor_queue = queue.Queue(maxsize=4096)
+    window_queue = queue.Queue(maxsize=4096)
     display_queue = queue.Queue(maxsize=4096)
 
-    acquisition = PIRAcquisition(interface_cfg, acq_queue)
-    processor = PIRProcessor(processing_cfg, processor_queue)
+    acquisition = PIRAcquisition(acq_queue)
+    processor = PIRProcessor(processor_queue)
+    slidingWindow = PIRSlidingWindow(window_queue, processor.segmenter)
 
     tee_stop = threading.Event()
     tee_thread = threading.Thread(
-        target=tee, args=(acq_queue, processor_queue, display_queue, tee_stop),
+        target=tee,
+        args=(acq_queue, [processor_queue, window_queue, display_queue], tee_stop),
         daemon=True,
     )
 
     acquisition.start()
     tee_thread.start()
     processor.start()
+    slidingWindow.start()
 
-    print(f"Requested {interface_cfg.sample_rate_hz} Hz -> "
-          f"ADS1115 set to {acquisition.actual_adc_rate_hz} SPS")
-    print(f"I2C bus {interface_cfg.i2c_bus_number}, address "
-          f"0x{interface_cfg.i2c_address:02X}")
-    print("Feature vector layout:")
-    print("[A1, T1, A2, T2, A3, T3, D, direction, E0, E1, E2, E3, E4, E5, E6, E7]\n")
+    print(f"Requested {sampleRateHz} Hz -> ADS1115 set to {acquisition.actualADCRateHz} SPS")
+    print(f"I2C bus {i2cBusNumber}, address 0x{i2cAddress:02X}")
+    print("Live Haar bars: 8 frequency-band energies, recomputed every update")
+    print("Console printout: 8-value Haar vector for each completed passage\n")
 
     # --- rolling buffers for plotting ---
-    maxlen = int(DISPLAY_WINDOW_S * interface_cfg.sample_rate_hz * 1.5) + 10
+    maxlen = int(DISPLAY_WINDOW_S * sampleRateHz * 1.5) + 10
     t_buf = deque(maxlen=maxlen)
     v_buf = deque(maxlen=maxlen)
     passage_count = 0
@@ -91,9 +95,9 @@ def main():
     fig, (ax_wave, ax_haar) = plt.subplots(2, 1, figsize=(10, 7))
 
     wave_line, = ax_wave.plot([], [], lw=1, color="tab:blue", label="PIR signal")
-    am_line, = ax_wave.plot([], [], lw=1, color="gray", linestyle="--", label="Am")
-    ap_line, = ax_wave.plot([], [], lw=1, color="tab:green", linestyle=":", label="Ap")
-    an_line, = ax_wave.plot([], [], lw=1, color="tab:red", linestyle=":", label="An")
+    base_line, = ax_wave.plot([], [], lw=1, color="gray", linestyle="--", label="baseline")
+    hi_line, = ax_wave.plot([], [], lw=1, color="tab:green", linestyle=":", label="+threshold")
+    lo_line, = ax_wave.plot([], [], lw=1, color="tab:red", linestyle=":", label="-threshold")
     ax_wave.set_ylim(-0.2, 3.5)
     ax_wave.set_xlim(0, DISPLAY_WINDOW_S)
     ax_wave.set_xlabel("time (s)")
@@ -105,7 +109,7 @@ def main():
     ax_haar.set_ylim(0, 1)
     ax_haar.set_xlabel("Haar frequency bin")
     ax_haar.set_ylabel("energy")
-    ax_haar.set_title("Latest Haar-bin energy vector")
+    ax_haar.set_title("Live Haar-bin energy vector (sliding window)")
 
     status_text = ax_wave.text(
         0.01, 0.95, "", transform=ax_wave.transAxes, va="top", fontsize=8,
@@ -124,15 +128,14 @@ def main():
             v_buf.append(v)
             recent_sample_times.append(ts)
 
-        while not processor.feature_queue.empty():
-            vec = processor.feature_queue.get()
+        while not processor.movementQueue.empty():
+            metadata = processor.movementQueue.get()
             passage_count += 1
-            direction = int(vec[7])
-            duration = vec[6]
+            duration = metadata["end_ts"] - metadata["start_ts"]
+            direction = metadata["direction"]
             np.set_printoptions(precision=4, suppress=True)
-            dir_str = {1: "positive-first", -1: "negative-first", 0: "unknown"}[direction]
-            print(f"[passage {passage_count}] duration={duration:.3f}s direction={dir_str}")
-            print(f"  vector = {vec}")
+            print(f"[passage {passage_count}] duration={duration:.3f}s direction={direction}")
+            print(f"  vector = {metadata['features']}")
 
         if t_buf:
             t_arr = np.array(t_buf)
@@ -143,22 +146,20 @@ def main():
                 rel_t = t_arr[mask] - t_arr[mask][0]
                 wave_line.set_data(rel_t, v_arr[mask])
 
-            Am = processor.segmenter.Am
-            delta = processing_cfg.threshold_delta_v
+            baseline = processor.segmenter.baselineVoltage
             xs = [0, DISPLAY_WINDOW_S]
-            am_line.set_data(xs, [Am, Am])
-            ap_line.set_data(xs, [Am + delta, Am + delta])
-            an_line.set_data(xs, [Am - delta, Am - delta])
+            base_line.set_data(xs, [baseline, baseline])
+            hi_line.set_data(xs, [baseline + threshold, baseline + threshold])
+            lo_line.set_data(xs, [baseline - threshold, baseline - threshold])
 
             if (v_arr[-50:] < RAIL_LOW_V).any() or (v_arr[-50:] > RAIL_HIGH_V).any():
                 clip_warned = True
 
-        if processor.haar is not None and processor.haar.latest is not None:
-            _, e_bins = processor.haar.latest
-            top = max(e_bins.max(), 1e-6)
-            ax_haar.set_ylim(0, top * 1.2)
-            for bar, e in zip(haar_bars, e_bins):
-                bar.set_height(e)
+        e_bins = np.array(slidingWindow.snapshot())
+        top = max(e_bins.max(), 1e-6)
+        ax_haar.set_ylim(0, top * 1.2)
+        for bar, e in zip(haar_bars, e_bins):
+            bar.set_height(e)
 
         if len(recent_sample_times) >= 2:
             dt = recent_sample_times[-1] - recent_sample_times[0]
@@ -168,15 +169,15 @@ def main():
 
         clip_flag = "CLIPPING NEAR RAIL" if clip_warned else "ok"
         status_text.set_text(
-            f"requested rate : {interface_cfg.sample_rate_hz:6.2f} Hz\n"
+            f"requested rate : {sampleRateHz:6.2f} Hz\n"
             f"achieved rate  : {achieved_hz:6.2f} Hz\n"
-            f"Am (noise mean): {processor.segmenter.Am:6.3f} V\n"
+            f"baseline       : {processor.segmenter.baselineVoltage:6.3f} V\n"
             f"signal range   : {clip_flag}\n"
             f"passages seen  : {passage_count}\n"
             f"uptime         : {time.monotonic() - t_start:6.1f} s"
         )
 
-        return wave_line, am_line, ap_line, an_line, status_text, *haar_bars
+        return wave_line, base_line, hi_line, lo_line, status_text, *haar_bars
 
     ani = animation.FuncAnimation(fig, update, interval=200, blit=False)
     plt.tight_layout()
@@ -188,6 +189,7 @@ def main():
     finally:
         processor.stop()
         acquisition.stop()
+        slidingWindow.stop()
         tee_stop.set()
 
 
