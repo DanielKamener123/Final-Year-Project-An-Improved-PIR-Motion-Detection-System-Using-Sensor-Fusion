@@ -4,8 +4,8 @@ from collections import deque
 
 import numpy as np
 
-from PIR.haar_features import getHaarFeatureVector, BLOCK_LENGTH, N_BINS
-from PIR.processing import MovementState
+from haar_features import getHaarFeatureVector, BLOCK_LENGTH, N_BINS
+from processing import MovementState
 
 
 # Continuously-updated PIR feature source.

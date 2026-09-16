@@ -4,8 +4,8 @@ from enum import Enum
 
 import numpy as np
 
-from PIR.interface import PIRAcquisition
-from PIR.haar_features import getHaarFeatureVector
+from interface import PIRAcquisition
+from haar_features import getHaarFeatureVector
 
 # Warm Up Time (seconds)
 warmupTime = 10.0

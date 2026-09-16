@@ -27,8 +27,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
-from PIR.interface import PIRInterfaceConfig, PIRAcquisition
-from PIR.processing import PIRProcessingConfig, PIRProcessor
+from interface import PIRInterfaceConfig, PIRAcquisition
+from processing import PIRProcessingConfig, PIRProcessor
 
 # --- signal rail limits for the 0-3.3 V PIR frontend output ---
 RAIL_LOW_V = 0.05
