@@ -3,7 +3,7 @@ import threading
 import queue
 
 import adafruit_ads1x15.ads1115 as ADS
-from adafruit_ads1x15.ads1x15 import Mode
+from adafruit_ads1x15.ads1x15 import Mode, Pin
 from adafruit_ads1x15.analog_in import AnalogIn
 import adafruit_extended_bus
 
@@ -52,7 +52,7 @@ class PIRAcquisition(threading.Thread):
         # Persistent channel object -- AnalogIn handles the raw-to-volts
         # conversion itself, so there is no separate getValue()/
         # toVoltage() step with this library.
-        self.channel = AnalogIn(self.adc, ADS.P0)
+        self.channel = AnalogIn(self.adc, Pin.A0)
 
     def stop(self):
         self.stopEvent.set()
