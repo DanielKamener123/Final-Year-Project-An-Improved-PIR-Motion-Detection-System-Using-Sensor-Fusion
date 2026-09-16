@@ -3,7 +3,7 @@ import threading
 import queue
 from dataclasses import dataclass
 
-import ADS1x15
+import adafruit_ads1x15.ads1115 as ADS
 
 
 # Sampling Rates Supported By ADC
@@ -35,7 +35,7 @@ class PIRAcquisition(threading.Thread):
 
         # ADC Setup
         self.actualADCRateHz, sampleRateIndex = selectDataRate(sampleRateHz)
-        self.adc = ADS1x15.ADS1115(i2cBusNumber, i2cAddress)
+        self.adc = ADS.ADS1115(i2cBusNumber, i2cAddress)
 
         # Gets Voltage Scale Of 125 uV
         self.adc.setGain(self.adc.PGA_4_096V)      
