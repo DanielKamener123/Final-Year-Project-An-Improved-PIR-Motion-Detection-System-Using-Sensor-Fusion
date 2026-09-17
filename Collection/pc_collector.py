@@ -2,23 +2,21 @@
 PC-side data-collection controller.
 
 Connects to the Rock 4C+ agent (Collection/rock_agent.py), starts a
-webcam recording, tells the Rock to start streaming combined feature
-vectors, timestamps each vector as it arrives (this machine's clock --
-the Rock's clock is not assumed to be in sync with it), and writes
-everything to CSV. Press Enter to stop: this also stops the recording
-and tells the Rock to stop streaming.
+webcam recording, tells the Rock to start streaming raw PIR samples and
+raw thermopile frames, timestamps every sensor message as it arrives
+using this PC's clock, and writes the two sensor streams to separate CSV
+files. Type stop to finish: this also stops the recording and tells the
+Rock to stop streaming.
 
-Every run is labelled as either training or testing data (--split, or
-you'll be prompted for it) and named after the date and time it was
-recorded, so repeated sessions never collide and you always know which
-pile a given CSV/video belongs to.
+Every recording belongs to either training or testing data and to a
+named run. Re-opening a current run creates a new recording folder
+inside that run instead of overwriting earlier data.
 
 Requires opencv-python on the PC (pip install opencv-python) -- not
 previously a project dependency, needed here for the webcam capture.
 
 Usage:
-    python -m Collection.pc_collector --host <rock ip> --split train
-    python -m Collection.pc_collector --host <rock ip>   # prompts for split
+    python -m Collection.pc_collector --host <rock ip>
 """
 
 import argparse
@@ -32,11 +30,27 @@ from pathlib import Path
 import cv2
 
 from Collection.protocol import (
-    CMD_START, CMD_STOP, KEY_SEQ, KEY_PIR,
-    KEY_THERMAL, KEY_THERMAL_DETECTED, DEFAULT_PORT,
-    PIR_VECTOR_LENGTH, THERMAL_FEATURE_NAMES,
-    KEY_STATUS, STATUS_READY,
+    CMD_START,
+    CMD_STOP,
+    DEFAULT_PORT,
+    KEY_FRAME,
+    KEY_PIR_BASELINE,
+    KEY_SEQ,
+    KEY_STATUS,
+    KEY_THERMAL_BACKGROUND,
+    KEY_THERMAL_FRAME_SHAPE,
+    KEY_THERMAL_RATE,
+    KEY_THERMAL_SIGMA,
+    KEY_TYPE,
+    KEY_VOLTAGE,
+    STATUS_READY,
+    STATUS_RECORDING,
+    STATUS_STOPPED,
+    TYPE_PIR,
+    TYPE_THERMAL,
 )
+
+DATASET_ROOT = Path("Datasets")
 
 
 def sendCommand(sock, cmd):
@@ -63,7 +77,7 @@ def connectWithRetry(host, port):
 def waitForReady(sock):
     buffer = ""
     while True:
-        chunk = sock.recv(1024)
+        chunk = sock.recv(4096)
         if not chunk:
             raise ConnectionError("Rock 4C+ closed the connection before sending ready status")
         buffer += chunk.decode("utf-8")
@@ -74,27 +88,122 @@ def waitForReady(sock):
                 continue
             payload = json.loads(line)
             if payload.get(KEY_STATUS) == STATUS_READY:
-                return
+                return payload
 
 
 # Asks which pile this session belongs to, if not already given on the
 # command line. Loops until a valid answer is given.
 def promptForSplit():
     while True:
-        answer = input("Is this a training or testing run? [train/test]: ").strip().lower()
-        if answer in ("train", "test"):
-            return answer
-        print("Please type 'train' or 'test'.")
+        answer = input("Is this training or testing data? [training/testing]: ").strip().lower()
+        if answer in ("train", "training"):
+            return "training"
+        if answer in ("test", "testing"):
+            return "testing"
+        print("Please type 'training' or 'testing'.")
 
 
-# Reads newline-delimited JSON feature-vector lines from sock until
-# stopEvent is set or the connection closes, timestamping and writing
-# each one to csvWriter as it arrives.
-def receiveLoop(sock, csvWriter, csvLock, stopEvent, rowCounter):
+def sanitiseName(name):
+    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in name.strip())
+    return cleaned.strip("_")
+
+
+def chooseRun(split):
+    splitDir = DATASET_ROOT / split
+    splitDir.mkdir(parents=True, exist_ok=True)
+
+    while True:
+        choice = input("Use a new run or a current run? [new/current]: ").strip().lower()
+        if choice == "new":
+            runName = sanitiseName(input("Enter a name for the new run: "))
+            if not runName:
+                print("Run name cannot be empty.")
+                continue
+            runDir = splitDir / runName
+            if runDir.exists():
+                print("That run already exists. Choose 'current' to add another recording to it.")
+                continue
+            runDir.mkdir(parents=True)
+            return runName, runDir
+
+        if choice == "current":
+            runs = sorted(path for path in splitDir.iterdir() if path.is_dir())
+            if not runs:
+                print("There are no current runs yet. Create a new run first.")
+                continue
+            print("Available runs:")
+            for index, run in enumerate(runs, start=1):
+                print(f"  {index}. {run.name}")
+            selection = input("Choose the run number or type its name: ").strip()
+            if selection.isdigit():
+                index = int(selection) - 1
+                if 0 <= index < len(runs):
+                    return runs[index].name, runs[index]
+            else:
+                runDir = splitDir / sanitiseName(selection)
+                if runDir.is_dir():
+                    return runDir.name, runDir
+            print("Could not find that run.")
+            continue
+
+        print("Please type 'new' or 'current'.")
+
+
+def recordVideo(cameraIndex, videoPath, frameTimesPath, stopEvent, readyEvent, videoInfo):
+    capture = cv2.VideoCapture(cameraIndex)
+    if not capture.isOpened():
+        videoInfo["error"] = f"Could not open camera index {cameraIndex}"
+        readyEvent.set()
+        return
+
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+    fps = float(capture.get(cv2.CAP_PROP_FPS))
+    if fps <= 1.0 or fps > 120.0:
+        fps = 30.0
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(videoPath), fourcc, fps, (width, height))
+    if not writer.isOpened():
+        capture.release()
+        videoInfo["error"] = f"Could not open video writer for {videoPath}"
+        readyEvent.set()
+        return
+
+    frameCount = 0
+    firstFrameTime = None
+
+    with open(frameTimesPath, "w", newline="", buffering=1) as frameTimesFile:
+        frameTimesWriter = csv.writer(frameTimesFile)
+        frameTimesWriter.writerow(["frame_index", "pc_timestamp"])
+
+        while not stopEvent.is_set():
+            ok, frame = capture.read()
+            if not ok:
+                continue
+            frameTime = time.time()
+            if firstFrameTime is None:
+                firstFrameTime = frameTime
+                videoInfo["video_start_pc_time"] = firstFrameTime
+                videoInfo["fps"] = fps
+                videoInfo["width"] = width
+                videoInfo["height"] = height
+                readyEvent.set()
+            writer.write(frame)
+            frameTimesWriter.writerow([frameCount, frameTime])
+            frameCount += 1
+
+    videoInfo["frame_count"] = frameCount
+    videoInfo["video_end_pc_time"] = time.time()
+    capture.release()
+    writer.release()
+
+
+def receiveLoop(sock, pirWriter, thermalWriter, stopEvent, state):
     buffer = ""
     while not stopEvent.is_set():
         try:
-            chunk = sock.recv(4096)
+            chunk = sock.recv(65536)
         except OSError:
             break
         if not chunk:
@@ -105,56 +214,44 @@ def receiveLoop(sock, csvWriter, csvLock, stopEvent, rowCounter):
             line = line.strip()
             if not line:
                 continue
-            pc_timestamp = time.time()
+
+            pcTimestamp = time.time()
             try:
                 payload = json.loads(line)
             except json.JSONDecodeError:
                 continue
 
-            row = [
-                pc_timestamp,
-                payload.get(KEY_SEQ),
-                payload.get(KEY_THERMAL_DETECTED),
-                *payload.get(KEY_PIR, [0.0] * PIR_VECTOR_LENGTH),
-                *payload.get(KEY_THERMAL, [0.0] * len(THERMAL_FEATURE_NAMES)),
-            ]
-            with csvLock:
-                csvWriter.writerow(row)
-            rowCounter[0] += 1
-
-
-# Records webcam video to videoPath and, separately, each frame's own
-# wall-clock timestamp to framesCsvPath -- alignment against the
-# feature CSV should use those per-frame timestamps, not an assumed
-# constant frame rate, since webcam capture timing can jitter.
-def recordVideo(cameraIndex, videoPath, framesCsvPath, stopEvent, startedEvent):
-    capture = cv2.VideoCapture(cameraIndex)
-    if not capture.isOpened():
-        print(f"Could not open camera index {cameraIndex} -- no video will be recorded.")
-        startedEvent.set()
-        return
-
-    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
-    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(videoPath), fourcc, 30.0, (width, height))
-
-    with open(framesCsvPath, "w", newline="") as framesFile:
-        framesWriter = csv.writer(framesFile)
-        framesWriter.writerow(["frame_index", "pc_timestamp"])
-
-        startedEvent.set()
-        frame_index = 0
-        while not stopEvent.is_set():
-            ok, frame = capture.read()
-            if not ok:
+            status = payload.get(KEY_STATUS)
+            if status == STATUS_RECORDING:
+                state["recording_status"] = payload
+                state["recording_status_pc_time"] = pcTimestamp
+                state["recordingEvent"].set()
                 continue
-            writer.write(frame)
-            framesWriter.writerow([frame_index, time.time()])
-            frame_index += 1
+            if status == STATUS_STOPPED:
+                state["stoppedEvent"].set()
+                continue
 
-    capture.release()
-    writer.release()
+            messageType = payload.get(KEY_TYPE)
+            if messageType == TYPE_PIR:
+                pirWriter.writerow([
+                    pcTimestamp,
+                    payload.get(KEY_SEQ),
+                    payload.get(KEY_VOLTAGE),
+                ])
+                state["pir_rows"] += 1
+            elif messageType == TYPE_THERMAL:
+                frame = payload.get(KEY_FRAME, [])
+                thermalWriter.writerow([
+                    pcTimestamp,
+                    payload.get(KEY_SEQ),
+                    *frame,
+                ])
+                state["thermal_rows"] += 1
+
+
+def writeMetadata(path, payload):
+    with open(path, "w", encoding="utf-8") as metadataFile:
+        json.dump(payload, metadataFile, indent=2)
 
 
 def main():
@@ -162,88 +259,136 @@ def main():
     parser.add_argument("--host", required=True, help="Rock 4C+ IP address or hostname")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--camera", type=int, default=0, help="OpenCV camera index")
-    parser.add_argument("--split", choices=["train", "test"], default=None,
-                         help="Label this session as training or testing data. "
-                              "Prompted for if not given.")
-    parser.add_argument("--label", default=None,
-                         help="Optional extra tag added to the filename, "
-                              "e.g. --label backyard_night")
     args = parser.parse_args()
 
-    split = args.split or promptForSplit()
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    sessionName = f"{split}_{args.label}_{timestamp}" if args.label else f"{split}_{timestamp}"
+    while input("Type 'start' to begin a recording: ").strip().lower() != "start":
+        pass
 
-    csvPath = Path(f"{sessionName}_features.csv")
-    videoPath = Path(f"{sessionName}_video.mp4")
-    framesCsvPath = Path(f"{sessionName}_video_frames.csv")
-    metaPath = Path(f"{sessionName}_meta.json")
+    split = promptForSplit()
+    runName, runDir = chooseRun(split)
+
+    recordingName = time.strftime("recording_%Y%m%d_%H%M%S")
+    recordingDir = runDir / recordingName
+    recordingDir.mkdir(parents=True)
+
+    pirPath = recordingDir / "pir.csv"
+    thermalPath = recordingDir / "thermopile.csv"
+    videoPath = recordingDir / "video.mp4"
+    videoFramesPath = recordingDir / "video_frames.csv"
+    metadataPath = recordingDir / "metadata.json"
 
     print(f"Connecting to Rock 4C+ at {args.host}:{args.port} ...")
     sock = connectWithRetry(args.host, args.port)
     print("Connected. Waiting for both sensors to report ready...")
-    waitForReady(sock)
-    print("Rock 4C+ ready. Starting camera and recording.")
+    readyPayload = waitForReady(sock)
+    print("Both sensors are warmed up and ready.")
+
+    frameShape = readyPayload.get(KEY_THERMAL_FRAME_SHAPE, [24, 32])
+    frameLength = int(frameShape[0]) * int(frameShape[1])
+
+    pirFile = open(pirPath, "w", newline="", buffering=1)
+    thermalFile = open(thermalPath, "w", newline="", buffering=1)
+    pirWriter = csv.writer(pirFile)
+    thermalWriter = csv.writer(thermalFile)
+    pirWriter.writerow(["pc_timestamp", "seq", "voltage"])
+    thermalWriter.writerow(["pc_timestamp", "seq"] + [f"pixel_{i}" for i in range(frameLength)])
 
     videoStopEvent = threading.Event()
-    videoStartedEvent = threading.Event()
+    videoReadyEvent = threading.Event()
+    videoInfo = {}
     videoThread = threading.Thread(
         target=recordVideo,
-        args=(args.camera, videoPath, framesCsvPath, videoStopEvent, videoStartedEvent),
+        args=(args.camera, videoPath, videoFramesPath, videoStopEvent, videoReadyEvent, videoInfo),
         daemon=True,
     )
     videoThread.start()
-    videoStartedEvent.wait(timeout=5.0)
+    cameraReady = videoReadyEvent.wait(timeout=5.0)
+    if videoInfo.get("error"):
+        pirFile.close()
+        thermalFile.close()
+        sock.close()
+        raise RuntimeError(videoInfo["error"])
+    if not cameraReady or videoInfo.get("video_start_pc_time") is None:
+        videoStopEvent.set()
+        pirFile.close()
+        thermalFile.close()
+        sock.close()
+        raise RuntimeError("Camera opened but no video frame was received within 5 seconds")
 
-    csvFile = open(csvPath, "w", newline="")
-    csvWriter = csv.writer(csvFile)
-    csvWriter.writerow(
-        ["pc_timestamp", "seq", "thermal_detected"]
-        + [f"pir_{i}" for i in range(PIR_VECTOR_LENGTH)]
-        + [f"thermal_{name}" for name in THERMAL_FEATURE_NAMES]
-    )
-    csvLock = threading.Lock()
-    rowCounter = [0]
-
-    collectStopEvent = threading.Event()
+    state = {
+        "pir_rows": 0,
+        "thermal_rows": 0,
+        "recording_status": None,
+        "recording_status_pc_time": None,
+        "recordingEvent": threading.Event(),
+        "stoppedEvent": threading.Event(),
+    }
+    receiveStopEvent = threading.Event()
     receiveThread = threading.Thread(
         target=receiveLoop,
-        args=(sock, csvWriter, csvLock, collectStopEvent, rowCounter),
+        args=(sock, pirWriter, thermalWriter, receiveStopEvent, state),
         daemon=True,
     )
+    receiveThread.start()
 
     collectionStart = time.time()
     sendCommand(sock, CMD_START)
-    receiveThread.start()
+    state["recordingEvent"].wait(timeout=3.0)
 
-    with open(metaPath, "w") as metaFile:
-        json.dump({
-            "split": split,
-            "collection_start_pc_time": collectionStart,
-            "rock_host": args.host,
-            "rock_port": args.port,
-            "csv_file": str(csvPath),
-            "video_file": str(videoPath),
-            "video_frames_file": str(framesCsvPath),
-            "pir_vector_length": PIR_VECTOR_LENGTH,
-            "thermal_feature_names": THERMAL_FEATURE_NAMES,
-        }, metaFile, indent=2)
+    print(f"Recording {split}/{runName}/{recordingName}")
+    while input("Type 'stop' to finish this recording: ").strip().lower() != "stop":
+        pass
 
-    print(f"Recording {split} session '{sessionName}'. Press Enter to stop...")
-    input()
-
+    collectionStop = time.time()
     sendCommand(sock, CMD_STOP)
-    collectStopEvent.set()
+    state["stoppedEvent"].wait(timeout=2.0)
+
+    receiveStopEvent.set()
     videoStopEvent.set()
     receiveThread.join(timeout=2.0)
     videoThread.join(timeout=2.0)
 
     sock.close()
-    csvFile.close()
+    pirFile.close()
+    thermalFile.close()
 
-    print(f"Done. {rowCounter[0]} feature rows written to {csvPath}")
-    print(f"Video written to {videoPath}, frame timestamps in {framesCsvPath}")
-    print(f"Session metadata in {metaPath}")
+    recordingStatus = state.get("recording_status") or readyPayload
+    metadata = {
+        "split": split,
+        "run_name": runName,
+        "recording_name": recordingName,
+        "collection_start_pc_time": collectionStart,
+        "collection_stop_pc_time": collectionStop,
+        "rock_host": args.host,
+        "rock_port": args.port,
+        "pir_file": pirPath.name,
+        "thermopile_file": thermalPath.name,
+        "video_file": videoPath.name,
+        "video_frames_file": videoFramesPath.name,
+        "pir_rows": state["pir_rows"],
+        "thermopile_rows": state["thermal_rows"],
+        "video_start_pc_time": videoInfo.get("video_start_pc_time"),
+        "video_end_pc_time": videoInfo.get("video_end_pc_time"),
+        "video_fps": videoInfo.get("fps"),
+        "video_width": videoInfo.get("width"),
+        "video_height": videoInfo.get("height"),
+        "video_frame_count": videoInfo.get("frame_count"),
+        "pir_baseline_v": recordingStatus.get(KEY_PIR_BASELINE),
+        "pir_sample_rate_hz": recordingStatus.get("pir_sample_rate_hz"),
+        "thermal_rate_hz": recordingStatus.get(KEY_THERMAL_RATE),
+        "thermal_frame_shape": recordingStatus.get(KEY_THERMAL_FRAME_SHAPE),
+        "thermal_background": recordingStatus.get(KEY_THERMAL_BACKGROUND),
+        "thermal_sigma": recordingStatus.get(KEY_THERMAL_SIGMA),
+        "recording_status_pc_time": state.get("recording_status_pc_time"),
+    }
+    writeMetadata(metadataPath, metadata)
+
+    print(f"Saved {state['pir_rows']} PIR samples to {pirPath}")
+    print(f"Saved {state['thermal_rows']} thermopile frames to {thermalPath}")
+    print(f"Saved video to {videoPath}")
+    print(f"Saved per-frame PC timestamps to {videoFramesPath}")
+    print(f"Saved session information to {metadataPath}")
+    print("After Label Studio annotation, place labels.csv in this recording folder.")
 
 
 if __name__ == "__main__":

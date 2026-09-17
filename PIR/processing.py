@@ -1,11 +1,8 @@
 import threading
 import queue
-from enum import Enum
+from collections import deque
 
 import numpy as np
-
-from interface import PIRAcquisition
-from haar_features import getHaarFeatureVector
 
 # Warm Up Time (seconds)
 warmupTime = 10.0
@@ -16,51 +13,128 @@ alpha = 0.01
 # Threshold Relative To Background
 threshold = 0.2
 
-# Checks A Certain Time To See If Still Movement - Occurs When Inside Threshold
-settleDownTime = 1.0
+# Default Rolling Window Time Used For Live Feature Extraction
+defaultWindowTime = 1.0
+
+# Maximum PIR History Kept In Memory
+maxHistoryTime = 30.0
+
+# Haar-transform based PIR feature extraction (8 frequency-band
+# energies), following the approach used for PIR-based clutter
+# rejection against wind-blown vegetation: a fixed-length block of the
+# signal is passed through a Haar transform and the transformed
+# coefficients are grouped into a small number of frequency bins, whose
+# energies form the feature vector.
+#
+# That paper analyses a 128-sample block and reports 8 frequency bins,
+# but does not publish the exact coefficient-to-bin grouping. This
+# implementation groups coefficients by dyadic scale using a 3-level
+# full Haar wavelet-packet decomposition (2**3 = 8 equal-width leaves),
+# which is the natural way to get 8 bins out of a Haar transform.
+# Applying a fixed 128-sample block to our variable-length completed
+# movement passages (rather than the paper's continuously-updating
+# sliding window) is an engineering adaptation, not a reproduction of
+# the paper -- flag this in any report text.
+# The current fusion path passes rolling-window samples into this same
+# feature extractor so the feature set can be changed later in one place.
+
+BLOCK_LENGTH = 128
+N_LEVELS = 3
+N_BINS = 2 ** N_LEVELS  # 8
 
 
-# Determines Initial Signal Direction
-class Direction(Enum):
-    UNKNOWN = 0
-    POSITIVE_FIRST = 1
-    NEGATIVE_FIRST = 2
+def _haarStep(signal):
+    """One level of the Haar transform: pairwise sum/difference.
 
-# Movement State
-class MovementState(Enum):
-    IDLE = 0
-    MOVING = 1
-    SETTLING = 2
+    Splits `signal` (even length) into an approximation half (local
+    averages) and a detail half (local differences), each half the
+    length of the input.
+    """
+    evens = signal[0::2]
+    odds = signal[1::2]
+    approx = (evens + odds) / np.sqrt(2.0)
+    detail = (evens - odds) / np.sqrt(2.0)
+    return approx, detail
 
 
-class MovementSegmenter:
-    def __init__(self):
+def _fullTreeEnergies(signal, levels):
+    """Recursively splits `signal` into 2**levels leaves via repeated
+    Haar steps (a full wavelet-packet tree, not just the approximation
+    branch), returning the energy (sum of squares) of each leaf.
+    """
+    if levels == 0:
+        return [float(np.sum(signal ** 2))]
+    approx, detail = _haarStep(signal)
+    return _fullTreeEnergies(approx, levels - 1) + _fullTreeEnergies(detail, levels - 1)
+
+
+def _prepareBlock(samples, blockLength=BLOCK_LENGTH):
+    """Extracts the voltage values from a completed passage and pads or
+    truncates them to a fixed `blockLength` so the wavelet-packet tree
+    always splits evenly into N_BINS leaves.
+    """
+    voltages = np.array([v for _, v in samples], dtype=np.float64)
+    if voltages.size >= blockLength:
+        return voltages[-blockLength:]
+    padded = np.zeros(blockLength, dtype=np.float64)
+    padded[: voltages.size] = voltages
+    return padded
+
+
+def getHaarFeatureVector(samples, blockLength=BLOCK_LENGTH, levels=N_LEVELS):
+    """Returns the 8-element Haar frequency-bin energy vector for a
+    completed PIR movement passage.
+    """
+    block = _prepareBlock(samples, blockLength)
+    energies = _fullTreeEnergies(block, levels)
+    return np.array(energies, dtype=np.float64)
+
+
+# Haar-transform feature vector: the passage is padded/truncated to a
+# fixed-length block and decomposed into 8 frequency-band energies.
+# Replaces the previous single peak-to-peak/duration pair. The transform
+# itself is implemented below in this processing file.
+def getFeatureVector(samples):
+    # Error Checking
+    if not samples:
+        return np.zeros(N_BINS, dtype=np.float64)
+
+    return getHaarFeatureVector(samples)
+
+
+def getFeatureNames():
+    return [f"haar_energy_{i}" for i in range(N_BINS)]
+
+
+class PIRProcessor:
+    def __init__(self, sampleQueue: queue.Queue | None = None, initialBaseline=None):
+        self.sampleQueue = sampleQueue
+        self.outputQueue = queue.Queue(maxsize=4096)
+
         # Baseline Voltage
-        self.baselineVoltage = 0.0
+        self.baselineVoltage = 0.0 if initialBaseline is None else float(initialBaseline)
 
         # Warm Up
-        self.initialised = False
+        self.initialised = initialBaseline is not None
         self.warmupStartTime = None
         self.warmupCount = 0
 
-        # Movement State
-        self.state = MovementState.IDLE
-        self.direction = Direction.UNKNOWN
-
-        # Movement Variables
-        self.settleStartTime = None
-        self.movementSamples = []
-        self.lastActiveTime = None
-        self.movementBaseline = 0.0
         self.lastTime = None
-        self.lastMovement = None
+        self.lastError = None
+
+        self.history = deque()
+        self.historyLock = threading.Lock()
+        self.stateLock = threading.Lock()
+
+        self.workerThread = None
+        self.stopEvent = threading.Event()
+
+        if self.sampleQueue is not None:
+            self.workerThread = threading.Thread(target=self.run, daemon=True)
 
     # Learns Background Temperature As Temperature Changes
     def updateBackground(self, v):
-        if not self.initialised:
-            self.baselineVoltage = v
-            self.initialised = True
-        else:
+        with self.stateLock:
             self.baselineVoltage = (1 - alpha) * self.baselineVoltage + alpha * v
 
     # Warm Up
@@ -91,121 +165,25 @@ class MovementSegmenter:
             self.warmup(ts, v)
             return None
 
-        # Calculate Threshold Values
-        thresholdHigh = self.baselineVoltage + threshold
-        thresholdLow = self.baselineVoltage - threshold
+        with self.stateLock:
+            baseline = self.baselineVoltage
 
-        # Check If Current Movement State Is Idle
-        if self.state == MovementState.IDLE:
-            # Check If Sample Is Out Of Threshold Bounds
-            if v >= thresholdHigh or v <= thresholdLow:
-                # Determine Initial Direction
-                self.direction = (Direction.POSITIVE_FIRST if v >= thresholdHigh else Direction.NEGATIVE_FIRST)
+        relative = v - baseline
 
-                # Update Movement State
-                self.state = MovementState.MOVING
+        with self.historyLock:
+            self.history.append((ts, relative))
+            cutoff = ts - maxHistoryTime
+            while self.history and self.history[0][0] < cutoff:
+                self.history.popleft()
 
-                # Set Movement Baseline
-                self.movementBaseline = self.baselineVoltage
+        if abs(relative) < threshold:
+            self.updateBackground(v)
 
-                # Get Timestamp And Difference Between Baseline Voltage And Samples Voltage
-                self.movementSamples = [(ts, v - self.movementBaseline)]
-                self.lastActiveTime = ts
-                self.settleStartTime = None
-            else:
-                self.updateBackground(v)
-            return None
-
-        # Keep The Movement Baseline Thresholds Fixed Throughout Movement Event
-        thresholdHigh = self.movementBaseline + threshold
-        thresholdLow = self.movementBaseline - threshold
-
-        # Add New Sample To Movement Samples
-        self.movementSamples.append((ts, v - self.movementBaseline))
-
-        # Check If Current Sample Is In Threshold Bounds
-        inside = thresholdLow < v < thresholdHigh
-        if not inside:
-            # Store New Sample And Continue
-            self.lastActiveTime = ts
-            self.settleStartTime = None
-            self.state = MovementState.MOVING
-            return None
-
-        # If Object Is In Movement State, Sample Is Withing Bounds So Must Start Settling Time
-        if self.state == MovementState.MOVING:
-            self.state = MovementState.SETTLING
-            self.settleStartTime = ts
-            return None
-
-        # Checks If Settling Down Timer Is Done
-        if ts - self.settleStartTime >= settleDownTime:
-            # Get The Completed Movement Samples - Not Including Settling Down Samples
-            completed = [(t, x) for t, x in self.movementSamples if t <= self.lastActiveTime]
-            direction = self.direction
-            self.lastMovement = {
-                "start_ts": completed[0][0],
-                "end_ts": self.lastActiveTime,
-                "completion_ts": ts,
-                "baseline_v": self.movementBaseline,
-                "direction": direction,
-            }
-
-            # Reset Movement State And Variables
-            self.state = MovementState.IDLE
-            self.direction = Direction.UNKNOWN
-            self.movementSamples = []
-            self.settleStartTime = None
-            self.lastActiveTime = None
-
-            # Return Movement Samples
-            return completed, direction, thresholdHigh, thresholdLow
-        return None
-
-
-#  Find Local Extreme - TODO: Understand
-def _find_local_extrema(samples):
-    """Return (index, ts, v, is_max) for local extrema.
-
-    A numerical peak detector used to implement the peak-selection stage.
-    Its exact comparison rules are implementation details, not a claimed
-    reproduction of the paper's unpublished sample-level algorithm.
-    """
-    extrema = []
-    vals = [v for _, v in samples]
-    for i in range(1, len(vals) - 1):
-        if vals[i - 1] < vals[i] >= vals[i + 1]:
-            extrema.append((i, samples[i][0], samples[i][1], True))
-        elif vals[i - 1] > vals[i] <= vals[i + 1]:
-            extrema.append((i, samples[i][0], samples[i][1], False))
-    return extrema
-
-# Haar-transform feature vector: the passage is padded/truncated to a
-# fixed-length block and decomposed into 8 frequency-band energies.
-# Replaces the previous single peak-to-peak/duration pair. See
-# PIR/haar_features.py for the transform itself.
-def getFeatureVector(samples, direction: Direction = Direction.UNKNOWN):
-    # Error Checking
-    if not samples:
-        raise ValueError("Cannot extract features from an empty passage")
-
-    return getHaarFeatureVector(samples)
-
-# Processing Pipeline
-class PIRProcessor:
-    def __init__(self, sampleQueue: queue.Queue):
-        self.sampleQueue = sampleQueue
-        self.featureQueue = queue.Queue()
-        self.movementQueue = queue.Queue()
-
-        self.segmenter = MovementSegmenter()
-
-        self.workerThread = threading.Thread(target=self.run, daemon=True)
-        self.stopEvent = threading.Event()
-
-        self.lastError = None
+        return relative
 
     def start(self):
+        if self.workerThread is None:
+            raise RuntimeError("PIRProcessor needs a sampleQueue before start() can be used")
         self.workerThread.start()
 
     def stop(self):
@@ -218,42 +196,69 @@ class PIRProcessor:
             except queue.Empty:
                 continue
             try:
-                result = self.segmenter.processSample(ts, v)
-                if result is not None:
-                    samples, direction, Ap, An = result
-                    vec = getFeatureVector(samples, direction)
-                    metadata = dict(self.segmenter.lastMovement)
-                    metadata.update({"features": vec.copy(),
-                                     "samples": list(samples),
-                                     "thresholds_v": (An, Ap)})
-                    self.movementQueue.put(metadata)
-                    self.featureQueue.put(vec)
+                relative = self.processSample(ts, v)
+                if relative is None:
+                    relative = float(v) - self.getBaseline()
+                try:
+                    self.outputQueue.put_nowait((ts, float(v), float(relative)))
+                except queue.Full:
+                    try:
+                        self.outputQueue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    self.outputQueue.put_nowait((ts, float(v), float(relative)))
             except (ValueError, TypeError) as exc:
                 self.lastError = exc
                 print(f"PIR processing error: {exc}")
             finally:
                 self.sampleQueue.task_done()
 
+    def getWindowSamples(self, windowTime=defaultWindowTime, endTime=None):
+        if windowTime <= 0:
+            raise ValueError("windowTime must be greater than zero")
+
+        with self.historyLock:
+            samples = list(self.history)
+
+        if not samples:
+            return []
+
+        if endTime is None:
+            endTime = samples[-1][0]
+        startTime = endTime - float(windowTime)
+        return [(ts, value) for ts, value in samples if startTime < ts <= endTime]
+
+    def snapshot(self, windowTime=defaultWindowTime, endTime=None):
+        samples = self.getWindowSamples(windowTime=windowTime, endTime=endTime)
+        return getFeatureVector(samples).tolist()
+
+    def getBaseline(self):
+        with self.stateLock:
+            return float(self.baselineVoltage)
+
 
 # Debug
 if __name__ == "__main__":
+    from PIR.interface import PIRAcquisition, sampleRateHz
+
     sample_queue = queue.Queue(maxsize=2048)
 
     acquisition = PIRAcquisition(sample_queue)
 
     processor = PIRProcessor(sample_queue)
 
-    print("PIR pipeline: Haar transform, 8 frequency-band energies")
+    print("PIR pipeline: rolling buffer with Haar transform, 8 frequency-band energies")
     print("Keep the scene empty during background calibration.")
-    print("Threshold and settle-time defaults are not calibrated for this PCB.")
+    print("Threshold default is not calibrated for this PCB.")
     acquisition.start()
     processor.start()
 
     try:
         while True:
-            vec = processor.featureQueue.get()
-            np.set_printoptions(precision=4, suppress=True)
-            print(vec)
+            ts, v, relative = processor.outputQueue.get()
+            if processor.initialised and int(ts * 2) != int((ts - 1.0 / sampleRateHz) * 2):
+                np.set_printoptions(precision=4, suppress=True)
+                print(processor.snapshot(defaultWindowTime))
     except KeyboardInterrupt:
         processor.stop()
         acquisition.stop()

@@ -17,35 +17,20 @@ CMD_STOP = "stop"
 # model and the PIR baseline calibration have finished warming up.
 KEY_STATUS = "status"
 STATUS_READY = "ready"
+STATUS_RECORDING = "recording"
+STATUS_STOPPED = "stopped"
 
-# Keys used in each streamed feature-vector line, sent Rock -> PC as one
-# JSON object per line.
+KEY_TYPE = "type"
+TYPE_PIR = "pir"
+TYPE_THERMAL = "thermal"
+
 KEY_SEQ = "seq"
-KEY_PIR = "pir"                            # list[float], length PIR_VECTOR_LENGTH.
-                                            # A live sliding-window Haar
-                                            # feature, recomputed fresh
-                                            # every tick -- always "now",
-                                            # never a held-over value.
-KEY_THERMAL = "thermal"                    # list[float], length len(THERMAL_FEATURE_NAMES)
-KEY_THERMAL_DETECTED = "thermal_detected"  # bool -- False if no blob was
-                                            # detected this frame, in which
-                                            # case KEY_THERMAL is all zeros.
+KEY_VOLTAGE = "voltage"
+KEY_FRAME = "frame"
 
-PIR_VECTOR_LENGTH = 8  # Haar-transform frequency-bin energies
-
-# Flattened Thermopile.thermopile_pipeline.BlobFeatures fields, in the
-# fixed order both ends must agree on. `centroid` (a 2-tuple in
-# BlobFeatures) is unpacked into centroid_row/centroid_col here.
-THERMAL_FEATURE_NAMES = [
-    "track_id", "centroid_row", "centroid_col",
-    "pixel_count", "width", "height",
-    "row_displacement", "col_displacement",
-    "displacement_px", "normalised_displacement",
-    "track_age_frames", "cumulative_displacement_px",
-    "mean_temperature_difference", "max_temperature_difference",
-    "virtual_position_x",
-    "horizontal_pixels_traversed", "vertical_pixels_traversed",
-    "horizontal_pixels_covered", "vertical_pixels_covered",
-    "horizontal_direction", "vertical_direction",
-]
-THERMAL_VECTOR_LENGTH = len(THERMAL_FEATURE_NAMES)
+KEY_PIR_BASELINE = "pir_baseline_v"
+KEY_THERMAL_BACKGROUND = "thermal_background"
+KEY_THERMAL_SIGMA = "thermal_sigma"
+KEY_THERMAL_FRAME_SHAPE = "thermal_frame_shape"
+KEY_PIR_SAMPLE_RATE = "pir_sample_rate_hz"
+KEY_THERMAL_RATE = "thermal_rate_hz"
