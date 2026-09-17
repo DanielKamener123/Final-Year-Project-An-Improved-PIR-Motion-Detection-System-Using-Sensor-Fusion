@@ -22,7 +22,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
-<<<<<<< HEAD
 from PIR.interface import PIRAcquisition, i2cBusNumber, i2cAddress, sampleRateHz
 from PIR.processing import (
     PIRProcessor,
@@ -30,11 +29,6 @@ from PIR.processing import (
     defaultWindowTime,
     N_BINS,
 )
-=======
-from interface import PIRAcquisition, i2cBusNumber, i2cAddress, sampleRateHz
-from processing import PIRProcessor, threshold
-from sliding_window import PIRSlidingWindow
->>>>>>> dd112f8e66e8b5dd9e816522d2b2ff7afc5a592f
 
 # --- signal rail limits for the 0-3.3 V PIR frontend output ---
 RAIL_LOW_V = 0.05
