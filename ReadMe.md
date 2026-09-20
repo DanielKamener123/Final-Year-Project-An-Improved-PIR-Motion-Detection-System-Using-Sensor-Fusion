@@ -48,7 +48,7 @@ python -m Collection.pc_collector --host <ROCK_IP>
 For example:
 
 ```bash
-python -m Collection.pc_collector --host 192.168.1.100
+python -m Collection.pc_collector --host 192.168.1.147 --camera 1
 ```
 
 Replace `192.168.1.100` with the actual IP address of the ROCK 4C+.

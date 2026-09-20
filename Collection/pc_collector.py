@@ -23,6 +23,7 @@ import argparse
 import csv
 import json
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -149,15 +150,64 @@ def chooseRun(split):
         print("Please type 'new' or 'current'.")
 
 
-def recordVideo(cameraIndex, videoPath, frameTimesPath, stopEvent, readyEvent, videoInfo):
-    capture = cv2.VideoCapture(cameraIndex)
+def openCamera(cameraIndex):
+    # On Windows, DirectShow is considerably more reliable for USB webcams
+    # than OpenCV's default MSMF backend. A common MSMF failure mode is that
+    # VideoCapture reports "opened" but capture.read() never returns a frame.
+    if sys.platform.startswith("win"):
+        capture = cv2.VideoCapture(cameraIndex, cv2.CAP_DSHOW)
+    else:
+        capture = cv2.VideoCapture(cameraIndex)
+
     if not capture.isOpened():
-        videoInfo["error"] = f"Could not open camera index {cameraIndex}"
+        return capture
+
+    # Logitech USB cameras are generally happiest delivering MJPG at a normal
+    # webcam resolution/rate. These are requests, not hard requirements.
+    capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    capture.set(cv2.CAP_PROP_FPS, 30)
+    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return capture
+
+
+def recordVideo(cameraIndex, videoPath, frameTimesPath, stopEvent, readyEvent, videoInfo):
+    capture = openCamera(cameraIndex)
+    backend = capture.getBackendName() if capture.isOpened() else "unknown"
+    videoInfo["camera_index"] = cameraIndex
+    videoInfo["camera_backend"] = backend
+
+    if not capture.isOpened():
+        videoInfo["error"] = (
+            f"Could not open camera index {cameraIndex}. "
+            "For the Logitech USB camera, try --camera 1 first; if necessary test --camera 0 or --camera 2."
+        )
         readyEvent.set()
         return
 
-    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
-    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+    # Do not trust isOpened(): actually require a frame. This also gives a USB
+    # webcam a short period to initialise before the VideoWriter is created.
+    firstFrame = None
+    firstFrameDeadline = time.monotonic() + 5.0
+    while not stopEvent.is_set() and time.monotonic() < firstFrameDeadline:
+        ok, frame = capture.read()
+        if ok and frame is not None and frame.size:
+            firstFrame = frame
+            break
+        time.sleep(0.05)
+
+    if firstFrame is None:
+        capture.release()
+        videoInfo["error"] = (
+            f"Camera index {cameraIndex} opened with backend {backend}, but no frame was received. "
+            "Close Camera/Teams/Zoom/OBS/Logitech Capture and retry. "
+            "If this is not the Logitech camera, use --camera 1 (or test 0/2)."
+        )
+        readyEvent.set()
+        return
+
+    height, width = firstFrame.shape[:2]
     fps = float(capture.get(cv2.CAP_PROP_FPS))
     if fps <= 1.0 or fps > 120.0:
         fps = 30.0
@@ -177,18 +227,31 @@ def recordVideo(cameraIndex, videoPath, frameTimesPath, stopEvent, readyEvent, v
         frameTimesWriter = csv.writer(frameTimesFile)
         frameTimesWriter.writerow(["frame_index", "pc_timestamp"])
 
+        # Save the frame already captured during camera warm-up.
+        frameTime = time.time()
+        firstFrameTime = frameTime
+        videoInfo["video_start_pc_time"] = firstFrameTime
+        videoInfo["fps"] = fps
+        videoInfo["width"] = width
+        videoInfo["height"] = height
+        writer.write(firstFrame)
+        frameTimesWriter.writerow([frameCount, frameTime])
+        frameCount += 1
+        readyEvent.set()
+
+        consecutiveFailures = 0
         while not stopEvent.is_set():
             ok, frame = capture.read()
-            if not ok:
+            if not ok or frame is None:
+                consecutiveFailures += 1
+                if consecutiveFailures >= 30:
+                    videoInfo["runtime_warning"] = "Camera stopped returning frames during recording"
+                    break
+                time.sleep(0.01)
                 continue
+
+            consecutiveFailures = 0
             frameTime = time.time()
-            if firstFrameTime is None:
-                firstFrameTime = frameTime
-                videoInfo["video_start_pc_time"] = firstFrameTime
-                videoInfo["fps"] = fps
-                videoInfo["width"] = width
-                videoInfo["height"] = height
-                readyEvent.set()
             writer.write(frame)
             frameTimesWriter.writerow([frameCount, frameTime])
             frameCount += 1
@@ -258,7 +321,7 @@ def main():
     parser = argparse.ArgumentParser(description="PC-side data-collection controller")
     parser.add_argument("--host", required=True, help="Rock 4C+ IP address or hostname")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--camera", type=int, default=0, help="OpenCV camera index")
+    parser.add_argument("--camera", type=int, default=1, help="OpenCV camera index (default 1, intended for the Logitech USB camera on this PC)")
     args = parser.parse_args()
 
     while input("Type 'start' to begin a recording: ").strip().lower() != "start":
@@ -301,8 +364,9 @@ def main():
         args=(args.camera, videoPath, videoFramesPath, videoStopEvent, videoReadyEvent, videoInfo),
         daemon=True,
     )
+    print(f"Opening camera index {args.camera} (Logitech USB camera expected)...")
     videoThread.start()
-    cameraReady = videoReadyEvent.wait(timeout=5.0)
+    cameraReady = videoReadyEvent.wait(timeout=7.0)
     if videoInfo.get("error"):
         pirFile.close()
         thermalFile.close()
@@ -373,6 +437,9 @@ def main():
         "video_width": videoInfo.get("width"),
         "video_height": videoInfo.get("height"),
         "video_frame_count": videoInfo.get("frame_count"),
+        "camera_index": videoInfo.get("camera_index"),
+        "camera_backend": videoInfo.get("camera_backend"),
+        "camera_runtime_warning": videoInfo.get("runtime_warning"),
         "pir_baseline_v": recordingStatus.get(KEY_PIR_BASELINE),
         "pir_sample_rate_hz": recordingStatus.get("pir_sample_rate_hz"),
         "thermal_rate_hz": recordingStatus.get(KEY_THERMAL_RATE),
