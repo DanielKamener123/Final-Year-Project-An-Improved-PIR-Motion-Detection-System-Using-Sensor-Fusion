@@ -47,6 +47,8 @@ from Collection.protocol import (
 )
 
 THERMAL_RATE_HZ = 4.0
+THERMAL_FRAME_SHAPE = (24, 32)
+THERMAL_FRAME_SIZE = 24 * 32
 
 
 def sendJson(conn, payload, sendLock):
@@ -63,7 +65,7 @@ def drainQueue(q):
             return
 
 
-def buildCalibrationPayload(processor, status):
+#def buildCalibrationPayload(processor, status):
     return {
         KEY_STATUS: status,
         KEY_PIR_BASELINE: processor.getBaseline(),
@@ -72,6 +74,20 @@ def buildCalibrationPayload(processor, status):
         KEY_THERMAL_FRAME_SHAPE: list(thermopile.FRAME_SHAPE),
         KEY_THERMAL_BACKGROUND: thermopile.getBackground().reshape(-1).astype(float).tolist(),
         KEY_THERMAL_SIGMA: thermopile.getSigma().reshape(-1).astype(float).tolist(),
+    }
+
+def buildCalibrationPayload(processor, status):
+    return {
+        KEY_STATUS: status,
+        KEY_PIR_BASELINE: processor.getBaseline(),
+        KEY_PIR_SAMPLE_RATE: float(sampleRateHz),
+
+        KEY_THERMAL_RATE: THERMAL_RATE_HZ,
+        KEY_THERMAL_FRAME_SHAPE: list(THERMAL_FRAME_SHAPE),
+
+        # Dummy thermopile calibration data
+        KEY_THERMAL_BACKGROUND: [0.0] * THERMAL_FRAME_SIZE,
+        KEY_THERMAL_SIGMA: [0.0] * THERMAL_FRAME_SIZE,
     }
 
 
@@ -99,10 +115,11 @@ def pirStreamLoop(conn, processor, stopEvent, sendLock):
         seq += 1
 
 
-def thermopileStreamLoop(conn, stopEvent, sendLock):
+#def thermopileStreamLoop(conn, stopEvent, sendLock):
     seq = 0
     while not stopEvent.is_set():
         rawFrame = thermopile.getFrame()
+        #rawFrame = [0 for i in range(768)]
         try:
             sendJson(
                 conn,
@@ -118,6 +135,37 @@ def thermopileStreamLoop(conn, stopEvent, sendLock):
             break
         seq += 1
 
+def thermopileStreamLoop(conn, stopEvent, sendLock):
+    seq = 0
+    period = 1.0 / THERMAL_RATE_HZ
+
+    while not stopEvent.is_set():
+        startTime = time.monotonic()
+
+        # Dummy 32x24 thermopile frame
+        rawFrame = [0.0] * THERMAL_FRAME_SIZE
+
+        try:
+            sendJson(
+                conn,
+                {
+                    KEY_TYPE: TYPE_THERMAL,
+                    KEY_SEQ: seq,
+                    KEY_FRAME: rawFrame,
+                },
+                sendLock,
+            )
+        except OSError:
+            stopEvent.set()
+            break
+
+        seq += 1
+
+        elapsed = time.monotonic() - startTime
+        remaining = period - elapsed
+
+        if remaining > 0:
+            stopEvent.wait(remaining)
 
 # Blocks until a JSON line {"cmd": expected} is received on conn.
 # Returns False if the connection closes first.
