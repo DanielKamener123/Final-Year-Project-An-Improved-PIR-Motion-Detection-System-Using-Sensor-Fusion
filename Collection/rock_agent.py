@@ -22,7 +22,7 @@ import time
 
 from PIR.interface import PIRAcquisition, sampleRateHz
 from PIR.processing import PIRProcessor
-import Thermopile.processing as thermopile
+#import Thermopile.processing as thermopile
 
 from Collection.protocol import (
     CMD_START,
@@ -66,15 +66,15 @@ def drainQueue(q):
 
 
 #def buildCalibrationPayload(processor, status):
-    return {
-        KEY_STATUS: status,
-        KEY_PIR_BASELINE: processor.getBaseline(),
-        KEY_PIR_SAMPLE_RATE: float(sampleRateHz),
-        KEY_THERMAL_RATE: THERMAL_RATE_HZ,
-        KEY_THERMAL_FRAME_SHAPE: list(thermopile.FRAME_SHAPE),
-        KEY_THERMAL_BACKGROUND: thermopile.getBackground().reshape(-1).astype(float).tolist(),
-        KEY_THERMAL_SIGMA: thermopile.getSigma().reshape(-1).astype(float).tolist(),
-    }
+    #return {
+    #    KEY_STATUS: status,
+    #    KEY_PIR_BASELINE: processor.getBaseline(),
+    #    KEY_PIR_SAMPLE_RATE: float(sampleRateHz),
+    #    KEY_THERMAL_RATE: THERMAL_RATE_HZ,
+    #    KEY_THERMAL_FRAME_SHAPE: list(thermopile.FRAME_SHAPE),
+    #    KEY_THERMAL_BACKGROUND: thermopile.getBackground().reshape(-1).astype(float).tolist(),
+    #    KEY_THERMAL_SIGMA: thermopile.getSigma().reshape(-1).astype(float).tolist(),
+    #}
 
 def buildCalibrationPayload(processor, status):
     return {
@@ -116,24 +116,24 @@ def pirStreamLoop(conn, processor, stopEvent, sendLock):
 
 
 #def thermopileStreamLoop(conn, stopEvent, sendLock):
-    seq = 0
-    while not stopEvent.is_set():
-        rawFrame = thermopile.getFrame()
+    #seq = 0
+    #while not stopEvent.is_set():
+    #    rawFrame = thermopile.getFrame()
         #rawFrame = [0 for i in range(768)]
-        try:
-            sendJson(
-                conn,
-                {
-                    KEY_TYPE: TYPE_THERMAL,
-                    KEY_SEQ: seq,
-                    KEY_FRAME: [float(value) for value in rawFrame],
-                },
-                sendLock,
-            )
-        except OSError:
-            stopEvent.set()
-            break
-        seq += 1
+    #    try:
+    #        sendJson(
+    #            conn,
+    #            {
+    #                KEY_TYPE: TYPE_THERMAL,
+    #                KEY_SEQ: seq,
+    #                KEY_FRAME: [float(value) for value in rawFrame],
+    #            },
+    #            sendLock,
+    #        )
+    #    except OSError:
+    #        stopEvent.set()
+    #        break
+    #    seq += 1
 
 def thermopileStreamLoop(conn, stopEvent, sendLock):
     seq = 0
@@ -195,7 +195,7 @@ def main():
     args = parser.parse_args()
 
     print("Warming up thermopile background model - keep the scene empty...")
-    thermopile.warmUp()
+    #thermopile.warmUp()
 
     print("Starting PIR acquisition (self-warms over its own ~10 s window)...")
     acq_queue = queue.Queue(maxsize=4096)
