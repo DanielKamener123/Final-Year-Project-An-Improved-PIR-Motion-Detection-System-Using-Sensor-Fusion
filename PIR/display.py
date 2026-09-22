@@ -1,19 +1,3 @@
-"""
-pir_display.py
-
-Live diagnostic display for bench-testing the PIR interface + processing
-pipeline. Not part of the deployed system -- for verifying wiring, signal
-levels, baseline behaviour, and feature vectors during development.
-
-Shows:
-  - Scrolling raw waveform with the background baseline and baseline-update
-    thresholds overlaid.
-  - Scrolling zero-centred PIR waveform.
-  - Live Haar-transform bin energies from the configured rolling window.
-  - Diagnostics: achieved sample rate, warm-up status, and warnings if the
-    signal is clipping near the 0 V / 3.3 V rails.
-"""
-
 import queue
 import time
 from collections import deque
@@ -27,7 +11,7 @@ from PIR.processing import (
     PIRProcessor,
     threshold,
     defaultWindowTime,
-    N_BINS,
+    getFeatureNames,
 )
 
 # --- signal rail limits for the 0-3.3 V PIR frontend output ---
@@ -47,9 +31,14 @@ def main():
     acquisition.start()
     processor.start()
 
+    feature_names = getFeatureNames()
+
     print(f"Requested {sampleRateHz} Hz -> ADS1115 set to {acquisition.actualADCRateHz} SPS")
     print(f"I2C bus {i2cBusNumber}, address 0x{i2cAddress:02X}")
-    print(f"Live Haar bars: {N_BINS} frequency-band energies from the last {defaultWindowTime:.2f} s\n")
+    print(
+        "Live PIR features from the last "
+        f"{defaultWindowTime:.2f} s: peak-to-peak amplitude, activity duration, peak separation\n"
+    )
 
     # --- rolling buffers for plotting ---
     maxlen = int(DISPLAY_WINDOW_S * sampleRateHz * 1.5) + 10
@@ -62,7 +51,7 @@ def main():
     clip_warned = False
     t_start = time.monotonic()
 
-    fig, (ax_wave, ax_relative, ax_haar) = plt.subplots(3, 1, figsize=(10, 9))
+    fig, (ax_wave, ax_relative, ax_features) = plt.subplots(3, 1, figsize=(10, 9))
 
     wave_line, = ax_wave.plot([], [], lw=1, label="PIR signal")
     base_line, = ax_wave.plot([], [], lw=1, linestyle="--", label="baseline")
@@ -85,11 +74,11 @@ def main():
     ax_relative.set_ylabel("volts from baseline")
     ax_relative.set_title("PIR zero-centred signal")
 
-    haar_bars = ax_haar.bar(range(N_BINS), [0] * N_BINS)
-    ax_haar.set_ylim(0, 1)
-    ax_haar.set_xlabel("Haar frequency bin")
-    ax_haar.set_ylabel("energy")
-    ax_haar.set_title(f"Live Haar-bin energy vector ({defaultWindowTime:.2f} s rolling window)")
+    feature_bars = ax_features.bar(range(len(feature_names)), [0.0] * len(feature_names))
+    ax_features.set_xticks(range(len(feature_names)), feature_names, rotation=15, ha="right")
+    ax_features.set_ylim(0, 1)
+    ax_features.set_ylabel("feature value")
+    ax_features.set_title(f"Live PIR temporal features ({defaultWindowTime:.2f} s rolling window)")
 
     status_text = ax_wave.text(
         0.01, 0.95, "", transform=ax_wave.transAxes, va="top", fontsize=8,
@@ -132,11 +121,11 @@ def main():
             if (v_arr[-50:] < RAIL_LOW_V).any() or (v_arr[-50:] > RAIL_HIGH_V).any():
                 clip_warned = True
 
-        e_bins = np.array(processor.snapshot(defaultWindowTime))
-        top = max(float(e_bins.max()), 1e-6)
-        ax_haar.set_ylim(0, top * 1.2)
-        for bar, e in zip(haar_bars, e_bins):
-            bar.set_height(e)
+        feature_values = np.asarray(processor.snapshot(defaultWindowTime), dtype=np.float64)
+        top = max(float(feature_values.max()), 1e-6)
+        ax_features.set_ylim(0, top * 1.2)
+        for bar, value in zip(feature_bars, feature_values):
+            bar.set_height(value)
 
         if len(recent_sample_times) >= 2:
             dt = recent_sample_times[-1] - recent_sample_times[0]
@@ -155,9 +144,9 @@ def main():
             f"uptime         : {time.monotonic() - t_start:6.1f} s"
         )
 
-        return wave_line, relative_line, base_line, hi_line, lo_line, status_text, *haar_bars
+        return wave_line, relative_line, base_line, hi_line, lo_line, status_text, *feature_bars
 
-    ani = animation.FuncAnimation(fig, update, interval=200, blit=False)
+    animation.FuncAnimation(fig, update, interval=200, blit=False)
     plt.tight_layout()
 
     try:

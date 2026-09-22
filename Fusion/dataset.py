@@ -58,8 +58,8 @@ def labelAtTime(labels, relativeVideoTime):
     return int(not active.empty)
 
 
-def preprocessPIR(pirData, initialBaseline):
-    processor = PIRProcessor(initialBaseline=initialBaseline)
+def preprocessPIR(pirData, initialBaseline, windowSeconds):
+    processor = PIRProcessor(initialBaseline=initialBaseline, windowTime=windowSeconds)
     timestamps = pirData["pc_timestamp"].to_numpy(dtype=np.float64)
     voltages = pirData["voltage"].to_numpy(dtype=np.float64)
     relative = np.empty_like(voltages)
@@ -129,7 +129,11 @@ def buildRecordingDataset(recordingDir, windowSeconds, stepSeconds):
         print(f"Skipping {recordingDir}: one of the sensor CSV files is empty")
         return pd.DataFrame()
 
-    pirTimestamps, pirRelative = preprocessPIR(pirData, metadata["pir_baseline_v"])
+    pirTimestamps, pirRelative = preprocessPIR(
+        pirData,
+        metadata["pir_baseline_v"],
+        windowSeconds,
+    )
     thermalTimestamps, thermalRows = processThermopile(thermalData, metadata)
 
     startTime = max(pirTimestamps[0] + windowSeconds, thermalTimestamps[0])

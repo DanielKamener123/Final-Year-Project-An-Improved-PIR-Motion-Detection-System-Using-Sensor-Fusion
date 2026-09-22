@@ -1,39 +1,20 @@
 # Running the Project
 
-This project uses the **ROCK 4C+** to collect data from the PIR sensor and MLX90640 thermopile, while a **PC** controls the recording session, timestamps the received sensor data and records the reference video.
-
-All commands should be run from the root `Project` directory.
-
----
-
 ## 1. Start the ROCK 4C+
 
-On the ROCK 4C+, open a terminal in the project directory and run:
+On ROCK, open a terminal in the project directory and run:
 
 ```bash
 python -m Collection.rock_agent --port 5050
 ```
 
-The ROCK will first:
+The ROCK will:
 
 1. Warm up the thermopile background model.
 2. Start the PIR acquisition.
 3. Wait approximately 10 seconds for the PIR baseline calibration.
 4. Wait until both sensors are ready.
 5. Open port `5050` and wait for the PC to connect.
-
-The scene should remain empty while the sensors are warming up.
-
-The terminal should eventually show:
-
-```text
-Both sensors warmed up.
-Listening on port 5050 for the PC to connect...
-```
-
-Leave this program running.
-
----
 
 ## 2. Start Data Collection on the PC
 
@@ -51,61 +32,9 @@ For example:
 python -m Collection.pc_collector --host 192.168.1.147 --camera 1
 ```
 
-Replace `192.168.1.100` with the actual IP address of the ROCK 4C+.
-
-The PC will connect to the ROCK and confirm that both sensors have completed their warm-up before recording can begin.
-
----
 
 ## 3. Select Training or Testing Data
-
-The program will ask:
-
-```text
-Is this training or testing data? [training/testing]:
-```
-
-Enter either:
-
-```text
-training
-```
-
-or:
-
-```text
-testing
-```
-
-Training and testing recordings are stored separately.
-
-The testing recordings should contain experiments that are not used to train the machine-learning models.
-
----
-
 ## 4. Select a Run
-
-The program will then allow a new run to be created or an existing run to be used.
-
-A run represents a continuous experimental group.
-
-For example:
-
-```text
-Datasets/
-├── training/
-│   ├── run_01/
-│   ├── run_02/
-│   └── run_03/
-└── testing/
-    ├── run_01/
-    └── run_02/
-```
-
-Multiple recordings can be stored inside the same run without overwriting previous recordings.
-
----
-
 ## 5. Record the Experiment
 
 Once the run has been selected:
@@ -117,97 +46,11 @@ Once the run has been selected:
 5. The PC timestamps all received sensor data using the **PC clock**.
 6. The video and sensor data are recorded simultaneously.
 
-Perform the complete experiment while the system continues recording.
-
-A recording can contain multiple movements through the field of view. It is not necessary to create a new recording for every individual movement.
-
-When the experiment is complete, type:
-
 ```text
 stop
 ```
 
-The PC will stop:
-
-* PIR data collection
-* thermopile data collection
-* video recording
-
-and save the recording.
-
----
-
 ## 6. Recorded Data
-
-Each recording is stored in a folder similar to:
-
-```text
-Datasets/
-└── training/
-    └── run_01/
-        └── recording_YYYYMMDD_HHMMSS/
-            ├── pir.csv
-            ├── thermopile.csv
-            ├── video.mp4
-            ├── video_frames.csv
-            └── metadata.json
-```
-
-### `pir.csv`
-
-Contains the raw PIR voltage samples:
-
-```text
-pc_timestamp, seq, voltage
-```
-
-### `thermopile.csv`
-
-Contains every raw 32 × 24 thermopile frame:
-
-```text
-pc_timestamp, seq, pixel_0, pixel_1, ... pixel_767
-```
-
-### `video.mp4`
-
-Reference video used to determine whether a human is present.
-
-### `video_frames.csv`
-
-Stores the PC timestamp associated with each recorded video frame.
-
-This is used to accurately align Label Studio labels with the sensor measurements.
-
-### `metadata.json`
-
-Stores information required to reproduce the processing, including sensor calibration information and recording configuration.
-
----
-
-# Labelling the Recorded Data
-
-The video is labelled using **Label Studio**.
-
-The required label is binary:
-
-```text
-Human Present
-No Human
-```
-
-Only the periods where a human is present need to be explicitly labelled as **Human Present**.
-
-All remaining video time is treated as:
-
-```text
-No Human
-```
-
-Use timeline/video interval labels so that the start and end of each period containing a human are identified.
-
----
-
 ## 7. Export Labels from Label Studio
 
 Export the labelled task from Label Studio as JSON.
@@ -236,17 +79,6 @@ labels.csv
 
 inside the recording folder.
 
-The complete recording folder will then contain:
-
-```text
-pir.csv
-thermopile.csv
-video.mp4
-video_frames.csv
-metadata.json
-labels.csv
-```
-
 If the Label Studio export contains multiple tasks, specify the required task:
 
 ```bash
@@ -255,23 +87,6 @@ python -m Collection.labelstudio_labels \
     --recording Datasets/training/run_01/recording_20260917_140000 \
     --task-id <TASK_ID>
 ```
-
----
-
-# Processing the Dataset and Running Machine Learning
-
-The raw sensor data is intentionally stored rather than only storing extracted features.
-
-This allows different:
-
-* processing methods
-* feature sets
-* window lengths
-* window overlaps
-
-to be tested later without collecting the sensor data again.
-
----
 
 ## 8. Configure the Fusion Window
 
@@ -471,38 +286,4 @@ Train models
 Test models
     ↓
 Compare performance
-```
-
-# Important
-
-Always run the Python commands from the root `Project` directory.
-
-For example:
-
-```text
-Project/
-├── Collection/
-├── Fusion/
-├── PIR/
-├── Thermopile/
-└── main.py
-```
-
-The terminal should be inside `Project/` before running commands such as:
-
-```bash
-python -m Collection.rock_agent
-```
-
-or:
-
-```bash
-python main.py
-```
-
-This is required so Python can correctly find packages such as:
-
-```python
-from PIR.interface import ...
-from Thermopile.processing import ...
 ```

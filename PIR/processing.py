@@ -16,100 +16,67 @@ threshold = 0.2
 # Default Rolling Window Time Used For Live Feature Extraction
 defaultWindowTime = 1.0
 
-# Maximum PIR History Kept In Memory
-maxHistoryTime = 30.0
-
-# Haar-transform based PIR feature extraction (8 frequency-band
-# energies), following the approach used for PIR-based clutter
-# rejection against wind-blown vegetation: a fixed-length block of the
-# signal is passed through a Haar transform and the transformed
-# coefficients are grouped into a small number of frequency bins, whose
-# energies form the feature vector.
-#
-# That paper analyses a 128-sample block and reports 8 frequency bins,
-# but does not publish the exact coefficient-to-bin grouping. This
-# implementation groups coefficients by dyadic scale using a 3-level
-# full Haar wavelet-packet decomposition (2**3 = 8 equal-width leaves),
-# which is the natural way to get 8 bins out of a Haar transform.
-# Applying a fixed 128-sample block to our variable-length completed
-# movement passages (rather than the paper's continuously-updating
-# sliding window) is an engineering adaptation, not a reproduction of
-# the paper -- flag this in any report text.
-# The current fusion path passes rolling-window samples into this same
-# feature extractor so the feature set can be changed later in one place.
-
-BLOCK_LENGTH = 128
-N_LEVELS = 3
-N_BINS = 2 ** N_LEVELS  # 8
+# PIR History Is Kept For Twice The Active Feature Window
+historyWindowMultiplier = 2.0
 
 
-def _haarStep(signal):
-    """One level of the Haar transform: pairwise sum/difference.
-
-    Splits `signal` (even length) into an approximation half (local
-    averages) and a detail half (local differences), each half the
-    length of the input.
-    """
-    evens = signal[0::2]
-    odds = signal[1::2]
-    approx = (evens + odds) / np.sqrt(2.0)
-    detail = (evens - odds) / np.sqrt(2.0)
-    return approx, detail
-
-
-def _fullTreeEnergies(signal, levels):
-    """Recursively splits `signal` into 2**levels leaves via repeated
-    Haar steps (a full wavelet-packet tree, not just the approximation
-    branch), returning the energy (sum of squares) of each leaf.
-    """
-    if levels == 0:
-        return [float(np.sum(signal ** 2))]
-    approx, detail = _haarStep(signal)
-    return _fullTreeEnergies(approx, levels - 1) + _fullTreeEnergies(detail, levels - 1)
-
-
-def _prepareBlock(samples, blockLength=BLOCK_LENGTH):
-    """Extracts the voltage values from a completed passage and pads or
-    truncates them to a fixed `blockLength` so the wavelet-packet tree
-    always splits evenly into N_BINS leaves.
-    """
-    voltages = np.array([v for _, v in samples], dtype=np.float64)
-    if voltages.size >= blockLength:
-        return voltages[-blockLength:]
-    padded = np.zeros(blockLength, dtype=np.float64)
-    padded[: voltages.size] = voltages
-    return padded
-
-
-def getHaarFeatureVector(samples, blockLength=BLOCK_LENGTH, levels=N_LEVELS):
-    """Returns the 8-element Haar frequency-bin energy vector for a
-    completed PIR movement passage.
-    """
-    block = _prepareBlock(samples, blockLength)
-    energies = _fullTreeEnergies(block, levels)
-    return np.array(energies, dtype=np.float64)
-
-
-# Haar-transform feature vector: the passage is padded/truncated to a
-# fixed-length block and decomposed into 8 frequency-band energies.
-# Replaces the previous single peak-to-peak/duration pair. The transform
-# itself is implemented below in this processing file.
 def getFeatureVector(samples):
-    # Error Checking
-    if not samples:
-        return np.zeros(N_BINS, dtype=np.float64)
+    """Return the compact PIR temporal feature vector for one rolling window.
 
-    return getHaarFeatureVector(samples)
+    Features:
+      1. peak_to_peak_v: max(signal) - min(signal)
+      2. activity_duration_s: time from the first to last sample whose
+         magnitude exceeds the activity threshold
+      3. peak_separation_s: absolute time between the dominant positive
+         and negative peaks, only when both lobes exceed the threshold
+
+    A window with no meaningful PIR activity returns all zeros.
+    """
+    if not samples:
+        return np.zeros(3, dtype=np.float64)
+
+    timestamps = np.asarray([ts for ts, _ in samples], dtype=np.float64)
+    values = np.asarray([value for _, value in samples], dtype=np.float64)
+
+    active = np.abs(values) >= float(threshold)
+    if not np.any(active):
+        return np.zeros(3, dtype=np.float64)
+
+    peak_to_peak = float(np.max(values) - np.min(values))
+
+    active_indices = np.flatnonzero(active)
+    activity_duration = float(timestamps[active_indices[-1]] - timestamps[active_indices[0]])
+
+    positive_index = int(np.argmax(values))
+    negative_index = int(np.argmin(values))
+    if values[positive_index] >= threshold and values[negative_index] <= -threshold:
+        peak_separation = float(abs(timestamps[positive_index] - timestamps[negative_index]))
+    else:
+        peak_separation = 0.0
+
+    return np.array(
+        [peak_to_peak, activity_duration, peak_separation],
+        dtype=np.float64,
+    )
 
 
 def getFeatureNames():
-    return [f"haar_energy_{i}" for i in range(N_BINS)]
+    return [
+        "peak_to_peak_v",
+        "activity_duration_s",
+        "peak_separation_s",
+    ]
 
 
 class PIRProcessor:
-    def __init__(self, sampleQueue: queue.Queue | None = None, initialBaseline=None):
+    def __init__(self, sampleQueue: queue.Queue | None = None, initialBaseline=None, windowTime=defaultWindowTime):
+        if windowTime <= 0:
+            raise ValueError("windowTime must be greater than zero")
+
         self.sampleQueue = sampleQueue
         self.outputQueue = queue.Queue(maxsize=4096)
+        self.windowTime = float(windowTime)
+        self.maxHistoryTime = historyWindowMultiplier * self.windowTime
 
         # Baseline Voltage
         self.baselineVoltage = 0.0 if initialBaseline is None else float(initialBaseline)
@@ -172,7 +139,7 @@ class PIRProcessor:
 
         with self.historyLock:
             self.history.append((ts, relative))
-            cutoff = ts - maxHistoryTime
+            cutoff = ts - self.maxHistoryTime
             while self.history and self.history[0][0] < cutoff:
                 self.history.popleft()
 
@@ -247,7 +214,7 @@ if __name__ == "__main__":
 
     processor = PIRProcessor(sample_queue)
 
-    print("PIR pipeline: rolling buffer with Haar transform, 8 frequency-band energies")
+    print("PIR pipeline: rolling buffer with peak-to-peak amplitude, activity duration, and peak separation")
     print("Keep the scene empty during background calibration.")
     print("Threshold default is not calibrated for this PCB.")
     acquisition.start()
