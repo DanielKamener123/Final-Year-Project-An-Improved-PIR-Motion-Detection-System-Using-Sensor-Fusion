@@ -8,9 +8,7 @@ from adafruit_ads1x15.analog_in import AnalogIn
 import adafruit_extended_bus
 
 
-# Sampling Rates Supported By ADC (this library takes the real Hz value
-# directly, not an index into a register table like the old ADS1x15-ADC
-# library did)
+# Sampling Rates Supported By ADC
 SUPPORTED_RATES = [8, 16, 32, 64, 128, 250, 475, 860]
 
 # Gets The Most Suitable Sampling Rate For Requested Rate
@@ -26,7 +24,7 @@ i2cBusNumber = 2
 i2cAddress = 0x48
 sampleRateHz = 25
 
-
+# PIR Acquisition Is On Its Own Thread
 class PIRAcquisition(threading.Thread):
     def __init__(self, outQueue: queue.Queue):
         super().__init__(daemon=True)
@@ -36,22 +34,12 @@ class PIRAcquisition(threading.Thread):
         # ADC Setup
         self.actualADCRateHz = selectDataRate(sampleRateHz)
 
-        # adafruit_ads1x15 needs an actual I2C bus object, not a bare bus
-        # number -- ExtendedI2C is the same tool Thermopile/interface.py
-        # already uses to address a non-default Linux I2C bus.
+        # Get I2C Bus Object For The ADS1115
         i2c = adafruit_extended_bus.ExtendedI2C(i2cBusNumber)
 
-        self.adc = ADS.ADS1115(
-            i2c,
-            address=i2cAddress,
-            gain=1,                          # +/- 4.096 V full-scale
-            data_rate=self.actualADCRateHz,
-            mode=Mode.CONTINUOUS,
-        )
+        self.adc = ADS.ADS1115(i2c, address=i2cAddress,gain=1, data_rate=self.actualADCRateHz, mode=Mode.CONTINUOUS)
 
-        # Persistent channel object -- AnalogIn handles the raw-to-volts
-        # conversion itself, so there is no separate getValue()/
-        # toVoltage() step with this library.
+        # Persistent Channel Object
         self.channel = AnalogIn(self.adc, Pin.A0)
 
     def stop(self):

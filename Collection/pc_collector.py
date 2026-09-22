@@ -1,24 +1,3 @@
-"""
-PC-side data-collection controller.
-
-Connects to the Rock 4C+ agent (Collection/rock_agent.py), starts a
-webcam recording, tells the Rock to start streaming raw PIR samples and
-raw thermopile frames, timestamps every sensor message as it arrives
-using this PC's clock, and writes the two sensor streams to separate CSV
-files. Type stop to finish: this also stops the recording and tells the
-Rock to stop streaming.
-
-Every recording belongs to either training or testing data and to a
-named run. Re-opening a current run creates a new recording folder
-inside that run instead of overwriting earlier data.
-
-Requires opencv-python on the PC (pip install opencv-python) -- not
-previously a project dependency, needed here for the webcam capture.
-
-Usage:
-    python -m Collection.pc_collector --host <rock ip>
-"""
-
 import argparse
 import csv
 import json
@@ -30,26 +9,9 @@ from pathlib import Path
 
 import cv2
 
-from Collection.protocol import (
-    CMD_START,
-    CMD_STOP,
-    DEFAULT_PORT,
-    KEY_FRAME,
-    KEY_PIR_BASELINE,
-    KEY_SEQ,
-    KEY_STATUS,
-    KEY_THERMAL_BACKGROUND,
-    KEY_THERMAL_FRAME_SHAPE,
-    KEY_THERMAL_RATE,
-    KEY_THERMAL_SIGMA,
-    KEY_TYPE,
-    KEY_VOLTAGE,
-    STATUS_READY,
-    STATUS_RECORDING,
-    STATUS_STOPPED,
-    TYPE_PIR,
-    TYPE_THERMAL,
-)
+from Collection.protocol import (CMD_START, CMD_STOP, DEFAULT_PORT, KEY_FRAME, KEY_PIR_BASELINE, KEY_PIR_SAMPLE_RATE, KEY_SEQ,
+                                 KEY_STATUS, KEY_ROCK_TIMESTAMP, KEY_ROCK_TIME, KEY_THERMAL_BACKGROUND, KEY_THERMAL_FRAME_SHAPE, KEY_THERMAL_RATE, KEY_THERMAL_SIGMA, 
+                                 KEY_TYPE, KEY_VOLTAGE, STATUS_READY, STATUS_RECORDING, STATUS_STOPPED, TYPE_PIR, TYPE_THERMAL)
 
 DATASET_ROOT = Path("Datasets")
 
@@ -58,9 +20,7 @@ def sendCommand(sock, cmd):
     sock.sendall((json.dumps({"cmd": cmd}) + "\n").encode("utf-8"))
 
 
-# Keeps trying to connect until the Rock is actually listening -- it
-# only opens the port once both sensors have finished warming up, so a
-# refused connection here just means "not ready yet", not an error.
+# Try To Connect To The Rock Until It Is Ready, Retrying Every Second If Not
 def connectWithRetry(host, port):
     while True:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -69,18 +29,17 @@ def connectWithRetry(host, port):
             return sock
         except OSError:
             sock.close()
-            print("Rock 4C+ not ready yet (still warming up or not started) -- retrying...")
+            print("Rock not ready yet, retrying...")
             time.sleep(1.0)
 
 
-# Blocks until the Rock sends {"status": "ready"}, confirming both the
-# thermopile and PIR have finished warming up.
+# Blocks Until Rock Ready, Confirming Both Sensors Are Warming Up
 def waitForReady(sock):
     buffer = ""
     while True:
         chunk = sock.recv(4096)
         if not chunk:
-            raise ConnectionError("Rock 4C+ closed the connection before sending ready status")
+            raise ConnectionError("Rock closed the connection before sending ready status")
         buffer += chunk.decode("utf-8")
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
@@ -92,8 +51,7 @@ def waitForReady(sock):
                 return payload
 
 
-# Asks which pile this session belongs to, if not already given on the
-# command line. Loops until a valid answer is given.
+# Asks Which Type Of Data Is Being Collected
 def promptForSplit():
     while True:
         answer = input("Is this training or testing data? [training/testing]: ").strip().lower()
@@ -108,7 +66,7 @@ def sanitiseName(name):
     cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in name.strip())
     return cleaned.strip("_")
 
-
+# Choose Which Dataset To Save To
 def chooseRun(split):
     splitDir = DATASET_ROOT / split
     splitDir.mkdir(parents=True, exist_ok=True)
@@ -151,9 +109,6 @@ def chooseRun(split):
 
 
 def openCamera(cameraIndex):
-    # On Windows, DirectShow is considerably more reliable for USB webcams
-    # than OpenCV's default MSMF backend. A common MSMF failure mode is that
-    # VideoCapture reports "opened" but capture.read() never returns a frame.
     if sys.platform.startswith("win"):
         capture = cv2.VideoCapture(cameraIndex, cv2.CAP_DSHOW)
     else:
@@ -162,8 +117,6 @@ def openCamera(cameraIndex):
     if not capture.isOpened():
         return capture
 
-    # Logitech USB cameras are generally happiest delivering MJPG at a normal
-    # webcam resolution/rate. These are requests, not hard requirements.
     capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -297,6 +250,7 @@ def receiveLoop(sock, pirWriter, thermalWriter, stopEvent, state):
             messageType = payload.get(KEY_TYPE)
             if messageType == TYPE_PIR:
                 pirWriter.writerow([
+                    payload.get(KEY_ROCK_TIMESTAMP),
                     pcTimestamp,
                     payload.get(KEY_SEQ),
                     payload.get(KEY_VOLTAGE),
@@ -305,6 +259,7 @@ def receiveLoop(sock, pirWriter, thermalWriter, stopEvent, state):
             elif messageType == TYPE_THERMAL:
                 frame = payload.get(KEY_FRAME, [])
                 thermalWriter.writerow([
+                    payload.get(KEY_ROCK_TIMESTAMP),
                     pcTimestamp,
                     payload.get(KEY_SEQ),
                     *frame,
@@ -346,6 +301,27 @@ def main():
     readyPayload = waitForReady(sock)
     print("Both sensors are warmed up and ready.")
 
+    # The sensor timestamps are generated on the ROCK while webcam timestamps
+    # are generated on the PC. Both machines must therefore have synchronised
+    # system clocks. This catches a badly wrong ROCK clock before data is saved.
+    rockReadyTime = readyPayload.get(KEY_ROCK_TIME)
+    clockDifference = None
+    if rockReadyTime is not None:
+        clockDifference = time.time() - float(rockReadyTime)
+        absDifference = abs(clockDifference)
+        print(f"ROCK/PC clock difference at connection: approximately {clockDifference:+.3f} s")
+        if absDifference > 0.25:
+            sock.close()
+            raise RuntimeError(
+                "ROCK and PC clocks are not synchronised closely enough (difference > 250 ms). "
+                "Synchronise both system clocks before collecting data."
+            )
+        if absDifference > 0.05:
+            print(
+                "WARNING: ROCK and PC clocks differ by more than 50 ms. "
+                "This is usable for testing, but re-synchronise them before the final dataset."
+            )
+
     frameShape = readyPayload.get(KEY_THERMAL_FRAME_SHAPE, [24, 32])
     frameLength = int(frameShape[0]) * int(frameShape[1])
 
@@ -353,8 +329,8 @@ def main():
     thermalFile = open(thermalPath, "w", newline="", buffering=1)
     pirWriter = csv.writer(pirFile)
     thermalWriter = csv.writer(thermalFile)
-    pirWriter.writerow(["pc_timestamp", "seq", "voltage"])
-    thermalWriter.writerow(["pc_timestamp", "seq"] + [f"pixel_{i}" for i in range(frameLength)])
+    pirWriter.writerow(["rock_timestamp", "pc_receive_timestamp", "seq", "voltage"])
+    thermalWriter.writerow(["rock_timestamp", "pc_receive_timestamp", "seq"] + [f"pixel_{i}" for i in range(frameLength)])
 
     videoStopEvent = threading.Event()
     videoReadyEvent = threading.Event()
@@ -397,7 +373,13 @@ def main():
 
     collectionStart = time.time()
     sendCommand(sock, CMD_START)
-    state["recordingEvent"].wait(timeout=3.0)
+    if not state["recordingEvent"].wait(timeout=3.0):
+        receiveStopEvent.set()
+        videoStopEvent.set()
+        sock.close()
+        pirFile.close()
+        thermalFile.close()
+        raise RuntimeError("ROCK did not confirm recording within 3 seconds")
 
     print(f"Recording {split}/{runName}/{recordingName}")
     while input("Type 'stop' to finish this recording: ").strip().lower() != "stop":
@@ -447,6 +429,9 @@ def main():
         "thermal_background": recordingStatus.get(KEY_THERMAL_BACKGROUND),
         "thermal_sigma": recordingStatus.get(KEY_THERMAL_SIGMA),
         "recording_status_pc_time": state.get("recording_status_pc_time"),
+        "rock_pc_clock_difference_at_ready_s": clockDifference,
+        "sensor_timestamp_source": "ROCK time.time() at acquisition",
+        "video_timestamp_source": "PC time.time() per frame",
     }
     writeMetadata(metadataPath, metadata)
 

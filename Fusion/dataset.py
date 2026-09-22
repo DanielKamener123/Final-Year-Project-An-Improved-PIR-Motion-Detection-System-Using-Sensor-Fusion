@@ -8,7 +8,7 @@ import pandas as pd
 from PIR.processing import PIRProcessor, getFeatureNames, getFeatureVector
 from Thermopile.thermopile_pipeline import BlobFeatures, ThermopilePipeline
 
-
+# Gets All Thermopile Features And Seperates Centroid Into Row And Column
 def thermalFeatureNames():
     names = []
     for field in fields(BlobFeatures):
@@ -18,7 +18,7 @@ def thermalFeatureNames():
             names.append(field.name)
     return names
 
-
+# Convert Thermopile Features Into A Dictionary, Seperating Centroid Into Row And Column
 def flattenThermalFeatures(features):
     values = {}
     for field in fields(BlobFeatures):
@@ -30,11 +30,11 @@ def flattenThermalFeatures(features):
             values[field.name] = float(value)
     return values
 
-
+# If No Blob Is Detected
 def emptyThermalFeatures():
     return {name: 0.0 for name in thermalFeatureNames()}
 
-
+# Gets Human/Not Human Labels From Video
 def loadLabels(recordingDir):
     labelsPath = recordingDir / "labels.csv"
     if not labelsPath.exists():
@@ -46,7 +46,7 @@ def loadLabels(recordingDir):
         raise ValueError(f"{labelsPath} must contain columns {sorted(required)}")
     return labels
 
-
+# Check If Time Is Within A Labelled Human Interval
 def labelAtTime(labels, relativeVideoTime):
     if labels.empty:
         return 0

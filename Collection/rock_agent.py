@@ -1,18 +1,3 @@
-"""
-Data-collection agent -- run this on the Rock 4C+.
-
-Runs the PIR and thermopile pipelines together, waits for a start
-command from Collection/pc_collector.py (run on the PC) over TCP, then
-streams raw PIR samples continuously and one raw thermopile frame per
-thermopile update until told to stop.
-
-The PC does the timestamping, not this script -- the two machines'
-clocks are not assumed to be in sync.
-
-Usage:
-    python -m Collection.rock_agent --port 5050
-"""
-
 import argparse
 import json
 import queue
@@ -24,27 +9,10 @@ from PIR.interface import PIRAcquisition, sampleRateHz
 from PIR.processing import PIRProcessor
 #import Thermopile.processing as thermopile
 
-from Collection.protocol import (
-    CMD_START,
-    CMD_STOP,
-    DEFAULT_PORT,
-    KEY_FRAME,
-    KEY_PIR_BASELINE,
-    KEY_PIR_SAMPLE_RATE,
-    KEY_SEQ,
-    KEY_STATUS,
-    KEY_THERMAL_BACKGROUND,
-    KEY_THERMAL_FRAME_SHAPE,
-    KEY_THERMAL_RATE,
-    KEY_THERMAL_SIGMA,
-    KEY_TYPE,
-    KEY_VOLTAGE,
-    STATUS_READY,
-    STATUS_RECORDING,
-    STATUS_STOPPED,
-    TYPE_PIR,
-    TYPE_THERMAL,
-)
+# Get All Command Variables
+from Collection.protocol import (CMD_START, CMD_STOP, DEFAULT_PORT, KEY_FRAME, KEY_PIR_BASELINE, KEY_PIR_SAMPLE_RATE, KEY_SEQ,
+                                 KEY_STATUS, KEY_ROCK_TIMESTAMP, KEY_ROCK_TIME, KEY_THERMAL_BACKGROUND, KEY_THERMAL_FRAME_SHAPE, KEY_THERMAL_RATE, KEY_THERMAL_SIGMA, 
+                                 KEY_TYPE, KEY_VOLTAGE, STATUS_READY, STATUS_RECORDING, STATUS_STOPPED, TYPE_PIR, TYPE_THERMAL)
 
 THERMAL_RATE_HZ = 4.0
 THERMAL_FRAME_SHAPE = (24, 32)
@@ -64,7 +32,7 @@ def drainQueue(q):
         except queue.Empty:
             return
 
-
+# Gets The Calibration Data For Both Sensors
 #def buildCalibrationPayload(processor, status):
     #return {
     #    KEY_STATUS: status,
@@ -76,9 +44,11 @@ def drainQueue(q):
     #    KEY_THERMAL_SIGMA: thermopile.getSigma().reshape(-1).astype(float).tolist(),
     #}
 
+# Gets The Calibration Data For Both Sensors
 def buildCalibrationPayload(processor, status):
     return {
         KEY_STATUS: status,
+        KEY_ROCK_TIME: time.time(),
         KEY_PIR_BASELINE: processor.getBaseline(),
         KEY_PIR_SAMPLE_RATE: float(sampleRateHz),
 
@@ -90,23 +60,31 @@ def buildCalibrationPayload(processor, status):
         KEY_THERMAL_SIGMA: [0.0] * THERMAL_FRAME_SIZE,
     }
 
-
+# Streams The PIR Data To The PC
 def pirStreamLoop(conn, processor, stopEvent, sendLock):
     seq = 0
     while not stopEvent.is_set():
         try:
-            _rock_ts, voltage, _relative = processor.outputQueue.get(timeout=0.5)
+            rockMonotonicTs, voltage, _relative = processor.outputQueue.get(timeout=0.5)
         except queue.Empty:
             continue
 
+        # Convert the acquisition-time monotonic timestamp to the ROCK wall-clock
+        # timeline. This preserves the true sampling instant instead of timestamping
+        # the sample later when it happens to be transmitted over TCP.
+        rockTimestamp = rockMonotonicTs + (time.time() - time.monotonic())
+
         try:
+            # Sends Sequency and Voltage Data to the PC - Sequence Ensures No Data Loss
             sendJson(
                 conn,
                 {
                     KEY_TYPE: TYPE_PIR,
                     KEY_SEQ: seq,
+                    KEY_ROCK_TIMESTAMP: float(rockTimestamp),
                     KEY_VOLTAGE: float(voltage),
                 },
+                # Makes Sure Data Is Finished Sending Before The Next Data Is Sent
                 sendLock,
             )
         except OSError:
@@ -114,7 +92,7 @@ def pirStreamLoop(conn, processor, stopEvent, sendLock):
             break
         seq += 1
 
-
+# Streams The Thermopile Data To The PC
 #def thermopileStreamLoop(conn, stopEvent, sendLock):
     #seq = 0
     #while not stopEvent.is_set():
@@ -135,12 +113,18 @@ def pirStreamLoop(conn, processor, stopEvent, sendLock):
     #        break
     #    seq += 1
 
+# Streams The Thermopile Data To The PC - TODO: REMOVE THIS DUMMY FUNCTION AND REPLACE WITH REAL THERMOPILE STREAMING
 def thermopileStreamLoop(conn, stopEvent, sendLock):
     seq = 0
     period = 1.0 / THERMAL_RATE_HZ
 
     while not stopEvent.is_set():
         startTime = time.monotonic()
+
+        # Timestamp the measurement on the ROCK before the frame is sent.
+        # With the ROCK system clock synced to the PC, this timestamp is on the
+        # same wall-clock timeline as the webcam timestamps recorded on the PC.
+        rockTimestamp = time.time()
 
         # Dummy 32x24 thermopile frame
         rawFrame = [0.0] * THERMAL_FRAME_SIZE
@@ -151,6 +135,7 @@ def thermopileStreamLoop(conn, stopEvent, sendLock):
                 {
                     KEY_TYPE: TYPE_THERMAL,
                     KEY_SEQ: seq,
+                    KEY_ROCK_TIMESTAMP: rockTimestamp,
                     KEY_FRAME: rawFrame,
                 },
                 sendLock,
@@ -190,14 +175,14 @@ def waitForCommand(conn, expected):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Rock 4C+ data-collection agent")
+    parser = argparse.ArgumentParser(description="Rock Agent")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args()
 
-    print("Warming up thermopile background model - keep the scene empty...")
+    print("Warming up thermopile")
     #thermopile.warmUp()
 
-    print("Starting PIR acquisition (self-warms over its own ~10 s window)...")
+    print("Starting PIR Acquisition")
     acq_queue = queue.Queue(maxsize=4096)
 
     acquisition = PIRAcquisition(acq_queue)
@@ -206,14 +191,12 @@ def main():
     acquisition.start()
     processor.start()
 
-    print("Waiting for PIR baseline calibration (~10 s)...")
+    print("Warming Up PIR")
     while not processor.initialised:
         time.sleep(0.2)
-    print("Both sensors warmed up.")
+    print("Both sensors warmed up")
 
-    # The port only opens now -- a PC trying to connect any earlier
-    # simply has nothing to connect to, rather than being accepted and
-    # fed data from sensors that are still calibrating.
+    # Rocks Port Opens For Connection From PC
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("0.0.0.0", args.port))
@@ -222,6 +205,7 @@ def main():
 
     try:
         while True:
+            # PC Connected, Waiting For Ready Status
             conn, addr = server.accept()
             sendLock = threading.Lock()
             print(f"PC connected from {addr}. Sending ready status...")
