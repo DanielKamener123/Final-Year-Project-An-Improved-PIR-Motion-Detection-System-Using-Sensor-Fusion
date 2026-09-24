@@ -56,8 +56,10 @@ class PIRAcquisition(threading.Thread):
             # Get Voltage
             v = self.channel.voltage
 
-            # Get Timestamp
-            ts = time.monotonic()
+            # Timestamp immediately after the ADC value has been read.
+            # This is deliberately simple: the project only needs all recorded
+            # streams aligned closely enough for video labelling and fusion.
+            ts = time.time()
 
             # Add (Time, Voltage) To Queue
             self.outQueue.put((ts, v))

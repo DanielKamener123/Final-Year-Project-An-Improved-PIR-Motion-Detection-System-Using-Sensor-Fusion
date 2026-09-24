@@ -1,8 +1,22 @@
-# Running the Project
+# Project Data Collection and Fusion
+
+This version uses a deliberately simple timing system.
+
+The **video is timestamped on the PC**, while the **PIR and thermopile are timestamped on the ROCK 4C+**. Immediately before each recording, the PC measures the fixed time offset between the two clocks. The PC then chooses a start time `T0` about 2 seconds in the future and tells the ROCK the equivalent ROCK-clock start time.
+
+Both machines are already initialised and waiting before `T0`. At `T0` they begin **saving** data. Every saved file also contains `time_s`, which is simply:
+
+```text
+time_s = seconds since T0
+```
+
+All later labelling and fusion uses `time_s`, so the rest of the project does not need to care whether the original timestamp came from the PC or the ROCK.
+
+---
 
 ## 1. Start the ROCK 4C+
 
-On ROCK, open a terminal in the project directory and run:
+On the ROCK, open a terminal in the project directory and run:
 
 ```bash
 python -m Collection.rock_agent --port 5050
@@ -10,52 +24,173 @@ python -m Collection.rock_agent --port 5050
 
 The ROCK will:
 
-1. Warm up the thermopile background model.
+1. Warm up the thermopile if the real thermopile is enabled.
 2. Start the PIR acquisition.
-3. Wait approximately 10 seconds for the PIR baseline calibration.
-4. Wait until both sensors are ready.
-5. Open port `5050` and wait for the PC to connect.
+3. Wait for the PIR baseline warm-up to finish.
+4. Open port `5050`.
+5. Wait for the PC.
+
+The PIR acquisition continues running in the background, but samples collected before the scheduled recording start are discarded.
+
+---
 
 ## 2. Start Data Collection on the PC
 
-On the PC, open a terminal in the project directory.
-
-Run:
+On the PC, run:
 
 ```bash
 python -m Collection.pc_collector --host <ROCK_IP>
 ```
 
-For example:
+Example:
 
 ```bash
 python -m Collection.pc_collector --host 192.168.1.147 --camera 1
 ```
 
+The PC then asks whether the recording is training or testing data and which run it belongs to.
 
-## 3. Select Training or Testing Data
-## 4. Select a Run
-## 5. Record the Experiment
+---
 
-Once the run has been selected:
+## 3. What Happens Before Recording Starts
 
-1. The PC camera starts recording.
-2. The PC sends the start command to the ROCK.
-3. PIR samples are continuously transmitted from the ROCK.
-4. Raw thermopile frames are continuously transmitted from the ROCK.
-5. The PC timestamps all received sensor data using the **PC clock**.
-6. The video and sensor data are recorded simultaneously.
+The collector automatically performs the following sequence:
+
+```text
+PC                                      ROCK 4C+
+ |                                          |
+ |---- connect ---------------------------->|
+ |                                          |
+ |  open camera and keep grabbing frames   | sensors already warmed up
+ |                                          |
+ |---- clock sync ------------------------->|
+ |<--- ROCK time ---------------------------|
+ |                                          |
+ | calculate: PC time - ROCK time          |
+ |                                          |
+ | choose common start time T0             |
+ | about 2 seconds in the future           |
+ |                                          |
+ |---- START_AT equivalent ROCK time ------>|
+ |                                          |
+ | wait for T0                             | wait for T0
+ |                                          |
+ |========== SAME REAL MOMENT ==============|
+ |                                          |
+ | save video frames                       | save PIR samples
+ |                                          | save thermopile frames
+```
+
+The network delay of the start command does not determine the start time. The command is sent **before** recording starts and tells both machines which future time to use.
+
+---
+
+## 4. How Timestamps Are Stored
+
+### PIR
+
+Each PIR voltage is timestamped on the ROCK immediately after the ADC value has been read.
+
+`pir.csv` contains:
+
+```text
+rock_timestamp, pc_timestamp, time_s, seq, voltage
+```
+
+- `rock_timestamp`: original ROCK clock timestamp.
+- `pc_timestamp`: the same measurement converted onto the PC clock using the measured fixed offset.
+- `time_s`: seconds since the common recording start `T0`.
+- `seq`: sample sequence number.
+- `voltage`: raw PIR voltage.
+
+### Thermopile
+
+Each complete thermopile frame is timestamped on the ROCK immediately after the frame has been read.
+
+`thermopile.csv` contains:
+
+```text
+rock_timestamp, pc_timestamp, time_s, seq, pixel_0, ...
+```
+
+### Video
+
+The camera is opened and warmed **before** `T0`. Frames are continuously grabbed before the recording starts so the camera is already running. Those warm-up frames are discarded.
+
+Only frames completed at or after `T0` are saved.
+
+`video_frames.csv` contains:
+
+```text
+frame_index, pc_timestamp, time_s
+```
+
+The important column for later processing is `time_s`.
+
+---
+
+## 5. Stop the Recording
+
+While the recording is running, type:
 
 ```text
 stop
 ```
 
-## 6. Recorded Data
-## 7. Export Labels from Label Studio
+The PC stops the ROCK sensor streams and finishes writing the video.
 
-Export the labelled task from Label Studio as JSON.
+Each recording folder contains approximately:
 
-Convert the Label Studio export into the format used by the project with:
+```text
+recording_YYYYMMDD_HHMMSS/
+├── pir.csv
+├── thermopile.csv
+├── video.mp4
+├── video_frames.csv
+└── metadata.json
+```
+
+`metadata.json` stores the measured PC/ROCK clock offset, the common start times, sensor configuration and recording information.
+
+---
+
+# Video Labelling
+
+## 6. Convert the Video for Label Studio
+
+The video file is written with a fixed declared frame rate of 30 fps so that each saved frame remains one video frame.
+
+Use:
+
+```bash
+ffmpeg -i "video.mp4" -c:v libx264 -pix_fmt yuv420p -r 30 -fps_mode cfr -c:a aac -movflags +faststart "video_labelstudio.mp4"
+```
+
+In the Label Studio configuration, use:
+
+```text
+frameRate="30"
+```
+
+This lets Label Studio frame numbers map back to the rows in `video_frames.csv`.
+
+---
+
+## 7. Label Human / No Human
+
+Label only the intervals where a human is present.
+
+For example:
+
+```text
+0.0 - 5.2 s      no human
+5.2 - 14.7 s     human
+14.7 - 22.0 s    no human
+```
+
+The exact sensor and video timestamps do not have to be perfect to the millisecond. They only need to share the same recording timeline closely enough that a human visible in the video corresponds to the same period in the PIR and thermopile data.
+
+Export the Label Studio task as JSON and run:
 
 ```bash
 python -m Collection.labelstudio_labels \
@@ -68,7 +203,7 @@ Example:
 ```bash
 python -m Collection.labelstudio_labels \
     --export labels.json \
-    --recording Datasets/training/run_01/recording_20260917_140000
+    --recording Datasets/training/run_01/recording_20260924_110000
 ```
 
 This creates:
@@ -77,26 +212,23 @@ This creates:
 labels.csv
 ```
 
-inside the recording folder.
+with:
 
-If the Label Studio export contains multiple tasks, specify the required task:
-
-```bash
-python -m Collection.labelstudio_labels \
-    --export labels.json \
-    --recording Datasets/training/run_01/recording_20260917_140000 \
-    --task-id <TASK_ID>
+```text
+start_s, end_s, human
 ```
+
+These times are on the same `time_s` timeline as the sensors.
+
+---
+
+# Offline Processing and Sensor Fusion
 
 ## 8. Configure the Fusion Window
 
-Open:
+Open `main.py`.
 
-```text
-main.py
-```
-
-The main configuration is at the top of the file:
+The main settings are:
 
 ```python
 WINDOW_SECONDS = 1.0
@@ -104,51 +236,71 @@ WINDOW_STEP_SECONDS = 0.25
 
 TRAIN_DATASET = Path("Datasets/training")
 TEST_DATASET = Path("Datasets/testing")
-
-OUTPUT_ROOT = Path("Processed")
 ```
 
 ### `WINDOW_SECONDS`
 
-Defines how much previous sensor history is used to produce each feature vector.
+This is how much previous PIR history is used for one PIR feature vector.
 
-For example:
+With:
 
 ```python
 WINDOW_SECONDS = 1.0
 ```
 
-means that the PIR feature extractor receives the previous **1 second of PIR measurements**.
-
-At 25 Hz this corresponds to approximately:
-
-```text
-25 PIR samples
-```
+and a PIR sampling rate of 25 Hz, approximately 25 PIR samples contribute to each window.
 
 ### `WINDOW_STEP_SECONDS`
 
-Defines how often a new fusion feature vector is produced.
+This controls how often one combined fusion vector is created.
 
-For example:
+With:
 
 ```python
 WINDOW_STEP_SECONDS = 0.25
 ```
 
-produces a new feature vector every:
+one new feature vector is generated every 250 ms.
 
-```text
-250 ms
-```
-
-Therefore a 1-second window with a 0.25-second step produces overlapping windows.
+The windows therefore overlap.
 
 ---
 
-## 9. Run the Offline Processing and Machine Learning
+## 9. How One Fusion Row Is Produced
 
-Once the training and testing recordings have been labelled, run:
+At a fusion time such as:
+
+```text
+t = 10.00 s
+```
+
+the offline processing does approximately this:
+
+```text
+PIR samples from 9.00 s to 10.00 s
+             ↓
+       PIR features
+
+latest thermopile frame at/before 10.00 s
+             ↓
+    thermopile features
+
+PIR features + thermopile features
+             ↓
+     combined feature vector
+
+labels.csv at 10.00 s
+             ↓
+      human / no human
+```
+
+Everything uses the same `time_s` timeline.
+
+---
+
+## 10. Run Processing and Machine Learning
+
+After the training and testing recordings have been labelled, run:
 
 ```bash
 python main.py
@@ -156,33 +308,18 @@ python main.py
 
 The program will:
 
-1. Load all raw training recordings.
-2. Reconstruct the PIR features using the feature extraction currently implemented in:
+1. Load the raw PIR recordings.
+2. Load the raw thermopile recordings.
+3. Use their `time_s` timestamps.
+4. Re-run PIR processing and extract PIR features.
+5. Re-run thermopile processing and extract thermopile features.
+6. Match the features at common fusion times.
+7. Apply the human/no-human video label for that time.
+8. Build the training and testing feature datasets.
+9. Train the machine-learning models.
+10. Test the models and save their results.
 
-```text
-PIR/processing.py
-```
-
-3. Reconstruct the thermopile features using the current thermopile processing pipeline.
-4. Combine the PIR and thermopile features.
-5. Create the training feature dataset.
-6. Repeat the same processing for the testing recordings.
-7. Train the machine-learning algorithms on the training dataset.
-8. Evaluate them using the separate testing dataset.
-9. Save the model comparison results.
-
----
-
-## 10. Processed Results
-
-For:
-
-```python
-WINDOW_SECONDS = 1.0
-WINDOW_STEP_SECONDS = 0.25
-```
-
-the output will be stored in:
+Outputs are stored under:
 
 ```text
 Processed/
@@ -192,98 +329,38 @@ Processed/
     └── model_comparison_results.csv
 ```
 
-### `train_features.csv`
-
-Feature vectors generated from the training recordings.
-
-### `test_features.csv`
-
-Feature vectors generated from the testing recordings.
-
-### `model_comparison_results.csv`
-
-Performance results for the machine-learning algorithms.
-
 ---
 
-# Testing Different Processing Methods
+# Simple Mental Model
 
-Because the original raw sensor measurements are preserved, the feature extraction can be modified without repeating the experiments.
-
-For example, change:
-
-```python
-WINDOW_SECONDS = 1.0
-```
-
-to:
-
-```python
-WINDOW_SECONDS = 0.5
-```
-
-and run:
-
-```bash
-python main.py
-```
-
-again.
-
-A new dataset will be generated from exactly the same recordings.
-
-Similarly, PIR features can be changed inside:
+The entire collection process can be understood as:
 
 ```text
-PIR/processing.py
+              COMMON START T0
+                    |
+        +-----------+-----------+
+        |           |           |
+       PIR      THERMOPILE    VIDEO
+        |           |           |
+      time_s      time_s      time_s
+        |           |           |
+        +-----------+-----------+
+                    |
+              raw recordings
+                    |
+              label video
+                    |
+               labels.csv
+                    |
+        process sensor data
+                    |
+        combined feature vector
+                    |
+            machine learning
 ```
 
-and the program can simply be rerun.
+The important rule is simply:
 
-The offline processing will use whatever PIR feature extraction is currently implemented in the processing file.
+> **All three streams share the same `t = 0`, and all later processing uses seconds since that start.**
 
-The same principle applies to the thermopile processing.
-
----
-
-# Typical Workflow
-
-```text
-ROCK 4C+
-    ↓
-Start rock_agent
-    ↓
-Sensors warm up
-    ↓
-PC
-    ↓
-Start pc_collector
-    ↓
-Choose training/testing
-    ↓
-Choose new/current run
-    ↓
-Start recording
-    ↓
-Perform experiments
-    ↓
-Type "stop"
-    ↓
-Raw PIR + thermal data + video saved
-    ↓
-Label video in Label Studio
-    ↓
-Convert labels to labels.csv
-    ↓
-Configure main.py
-    ↓
-Run python main.py
-    ↓
-Generate fusion feature vectors
-    ↓
-Train models
-    ↓
-Test models
-    ↓
-Compare performance
-```
+No camera-latency calibration, end-of-recording clock re-sync, or millisecond-level correction is required for this version.

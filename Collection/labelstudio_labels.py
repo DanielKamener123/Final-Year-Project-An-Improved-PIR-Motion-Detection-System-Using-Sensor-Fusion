@@ -18,6 +18,35 @@ import pandas as pd
 
 POSITIVE_LABELS = {"human", "human present", "person", "person present", "1"}
 
+# The Converted Video That Was Labelled In Label Studio
+LABELSTUDIO_VIDEO = "video_labelstudio.mp4"
+
+
+# Checks The Labelled Video Has Exactly One Frame Per Row Of video_frames.csv
+# (If ffmpeg Duplicated Or Dropped Frames, Label Frame Numbers Would Point To The Wrong Timestamps)
+def checkFrameCount(videoPath, frameTimes):
+    if not videoPath.exists():
+        print(f"Warning: {videoPath.name} not found - frame count could not be checked")
+        return
+    try:
+        import cv2
+    except ImportError:
+        print("Warning: OpenCV not installed - frame count could not be checked")
+        return
+
+    capture = cv2.VideoCapture(str(videoPath))
+    frameCount = 0
+    while capture.grab():
+        frameCount += 1
+    capture.release()
+
+    if frameCount != len(frameTimes):
+        raise ValueError(
+            f"{videoPath.name} has {frameCount} frames but video_frames.csv has {len(frameTimes)} rows. "
+            "Re-convert the video with the ffmpeg command in the ReadMe (-r 30) so frames stay one-to-one."
+        )
+    print(f"Frame count check passed: {frameCount} frames")
+
 
 def normaliseLabel(value):
     return str(value).strip().lower().replace("_", " ")
@@ -79,8 +108,9 @@ def frameRangesToTimes(frameRanges, frameTimes, frameBase):
     if frameTimes.empty:
         raise ValueError("video_frames.csv contains no frames")
 
-    times = frameTimes["pc_timestamp"].to_numpy(dtype=np.float64)
-    firstTime = float(times[0])
+    if "time_s" not in frameTimes.columns:
+        raise ValueError("video_frames.csv must contain the time_s column from the new collector")
+    times = frameTimes["time_s"].to_numpy(dtype=np.float64)
     if len(times) >= 2:
         medianPeriod = float(np.median(np.diff(times)))
     else:
@@ -100,7 +130,7 @@ def frameRangesToTimes(frameRanges, frameTimes, frameBase):
         else:
             endTime = float(times[endIndex] + medianPeriod)
 
-        converted.append((startTime - firstTime, endTime - firstTime, human))
+        converted.append((startTime, endTime, human))
 
     converted.sort(key=lambda item: item[0])
     return converted
@@ -134,6 +164,15 @@ def main():
     frameRanges = extractFrameRanges(exportData, taskId=args.task_id)
     requestedBase = None if args.frame_base == "auto" else int(args.frame_base)
     frameBase = chooseFrameBase(frameRanges, requestedBase)
+
+    # Make Sure Label Frame Numbers Line Up With The Recorded Frame Timestamps
+    checkFrameCount(recordingDir / LABELSTUDIO_VIDEO, frameTimes)
+    lastFrame = max((end for _, end, _ in frameRanges), default=frameBase)
+    if lastFrame - frameBase > len(frameTimes) - 1:
+        raise ValueError(
+            f"A label ends at frame {lastFrame} but the recording only has {len(frameTimes)} frames. "
+            'Check the Label Studio config uses frameRate="30".'
+        )
     ranges = frameRangesToTimes(frameRanges, frameTimes, frameBase)
 
     with open(labelsPath, "w", newline="", encoding="utf-8") as labelsFile:

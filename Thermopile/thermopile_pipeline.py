@@ -222,8 +222,11 @@ def score_blob(blob, track, temperature_difference):
     virtual_position_x = float(blob.centroid[1])
 
     # Get Pixels Travelled
-    horizontal_pixels_traversed = track.horizontal_pixels_traversed + abs(col_displacement)
-    vertical_pixels_traversed = track.vertical_pixels_traversed + abs(row_displacement)
+    # No Previous Track Means Nothing Has Been Travelled Yet (Avoids AttributeError On None)
+    previous_horizontal = track.horizontal_pixels_traversed if track is not None else 0.0
+    previous_vertical = track.vertical_pixels_traversed if track is not None else 0.0
+    horizontal_pixels_traversed = previous_horizontal + abs(col_displacement)
+    vertical_pixels_traversed = previous_vertical + abs(row_displacement)
 
     # Get Pixels Covered
     horizontal_pixels_covered = width
@@ -400,4 +403,4 @@ class ThermopilePipeline:
         self.last_threshold = threshold
         self.last_scene_temp = scene_temp
 
-        return results
+        return results

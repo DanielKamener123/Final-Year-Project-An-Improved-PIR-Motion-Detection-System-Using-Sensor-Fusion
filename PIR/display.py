@@ -146,7 +146,8 @@ def main():
 
         return wave_line, relative_line, base_line, hi_line, lo_line, status_text, *feature_bars
 
-    animation.FuncAnimation(fig, update, interval=200, blit=False)
+    # Keep A Reference - Otherwise The Animation Is Garbage Collected And The Plot Never Updates
+    ani = animation.FuncAnimation(fig, update, interval=200, blit=False, cache_frame_data=False)
     plt.tight_layout()
 
     try:

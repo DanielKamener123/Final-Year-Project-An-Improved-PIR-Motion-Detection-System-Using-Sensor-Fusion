@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import queue
 import socket
 import sys
 import threading
@@ -9,18 +10,44 @@ from pathlib import Path
 
 import cv2
 
-from Collection.protocol import (CMD_START, CMD_STOP, DEFAULT_PORT, KEY_FRAME, KEY_PIR_BASELINE, KEY_PIR_SAMPLE_RATE, KEY_SEQ,
-                                 KEY_STATUS, KEY_ROCK_TIMESTAMP, KEY_ROCK_TIME, KEY_THERMAL_BACKGROUND, KEY_THERMAL_FRAME_SHAPE, KEY_THERMAL_RATE, KEY_THERMAL_SIGMA, 
-                                 KEY_TYPE, KEY_VOLTAGE, STATUS_READY, STATUS_RECORDING, STATUS_STOPPED, TYPE_PIR, TYPE_THERMAL)
+from Collection.protocol import (
+    CMD_START_AT,
+    CMD_STOP,
+    CMD_SYNC,
+    DEFAULT_PORT,
+    KEY_FRAME,
+    KEY_PC_SEND_TIME,
+    KEY_PIR_BASELINE,
+    KEY_PIR_SAMPLE_RATE,
+    KEY_ROCK_START_TIME,
+    KEY_ROCK_TIMESTAMP,
+    KEY_ROCK_TIME,
+    KEY_SEQ,
+    KEY_STATUS,
+    KEY_THERMAL_BACKGROUND,
+    KEY_THERMAL_FRAME_SHAPE,
+    KEY_THERMAL_RATE,
+    KEY_THERMAL_SIGMA,
+    KEY_TYPE,
+    KEY_VOLTAGE,
+    STATUS_READY,
+    STATUS_RECORDING,
+    STATUS_STOPPED,
+    TYPE_PIR,
+    TYPE_SYNC,
+    TYPE_THERMAL,
+)
 
 DATASET_ROOT = Path("Datasets")
+VIDEO_FILE_FPS = 30.0
+CLOCK_SYNC_PINGS = 10
+START_DELAY_SECONDS = 2.0
 
 
-def sendCommand(sock, cmd):
-    sock.sendall((json.dumps({"cmd": cmd}) + "\n").encode("utf-8"))
+def sendCommand(sock, command, **fields):
+    sock.sendall((json.dumps({"cmd": command, **fields}) + "\n").encode("utf-8"))
 
 
-# Try To Connect To The Rock Until It Is Ready, Retrying Every Second If Not
 def connectWithRetry(host, port):
     while True:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -29,18 +56,18 @@ def connectWithRetry(host, port):
             return sock
         except OSError:
             sock.close()
-            print("Rock not ready yet, retrying...")
+            print("ROCK not ready yet, retrying...")
             time.sleep(1.0)
 
 
-# Blocks Until Rock Ready, Confirming Both Sensors Are Warming Up
 def waitForReady(sock):
     buffer = ""
     while True:
         chunk = sock.recv(4096)
         if not chunk:
-            raise ConnectionError("Rock closed the connection before sending ready status")
+            raise ConnectionError("ROCK closed the connection before sending ready status")
         buffer += chunk.decode("utf-8")
+
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
             line = line.strip()
@@ -51,7 +78,28 @@ def waitForReady(sock):
                 return payload
 
 
-# Asks Which Type Of Data Is Being Collected
+def measureClockOffset(sock, state, pings=CLOCK_SYNC_PINGS):
+    """Estimate PC time - ROCK time using short round-trip sync messages."""
+    samples = []
+    for _ in range(pings):
+        state["syncEvent"].clear()
+        pcSend = time.time()
+        sendCommand(sock, CMD_SYNC, **{KEY_PC_SEND_TIME: pcSend})
+        if state["syncEvent"].wait(timeout=1.0):
+            samples.append(state["sync_reply"])
+
+    if not samples:
+        return None
+
+    # The shortest round-trip sample has the least uncertainty from network delay.
+    pcSend, rockTime, pcReceive = min(samples, key=lambda sample: sample[2] - sample[0])
+    return {
+        "offset_s": 0.5 * (pcSend + pcReceive) - rockTime,
+        "round_trip_s": pcReceive - pcSend,
+        "pings": len(samples),
+    }
+
+
 def promptForSplit():
     while True:
         answer = input("Is this training or testing data? [training/testing]: ").strip().lower()
@@ -66,7 +114,7 @@ def sanitiseName(name):
     cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in name.strip())
     return cleaned.strip("_")
 
-# Choose Which Dataset To Save To
+
 def chooseRun(split):
     splitDir = DATASET_ROOT / split
     splitDir.mkdir(parents=True, exist_ok=True)
@@ -125,25 +173,29 @@ def openCamera(cameraIndex):
     return capture
 
 
-def recordVideo(cameraIndex, videoPath, frameTimesPath, stopEvent, readyEvent, videoInfo):
+def recordVideo(
+    cameraIndex,
+    videoPath,
+    frameTimesPath,
+    stopEvent,
+    cameraReadyEvent,
+    startConfiguredEvent,
+    videoInfo,
+):
+    """Warm the camera first, then save only frames completed at/after common T0."""
     capture = openCamera(cameraIndex)
     backend = capture.getBackendName() if capture.isOpened() else "unknown"
     videoInfo["camera_index"] = cameraIndex
     videoInfo["camera_backend"] = backend
 
     if not capture.isOpened():
-        videoInfo["error"] = (
-            f"Could not open camera index {cameraIndex}. "
-            "For the Logitech USB camera, try --camera 1 first; if necessary test --camera 0 or --camera 2."
-        )
-        readyEvent.set()
+        videoInfo["error"] = f"Could not open camera index {cameraIndex}. Try --camera 0, 1 or 2."
+        cameraReadyEvent.set()
         return
 
-    # Do not trust isOpened(): actually require a frame. This also gives a USB
-    # webcam a short period to initialise before the VideoWriter is created.
     firstFrame = None
-    firstFrameDeadline = time.monotonic() + 5.0
-    while not stopEvent.is_set() and time.monotonic() < firstFrameDeadline:
+    deadline = time.monotonic() + 5.0
+    while not stopEvent.is_set() and time.monotonic() < deadline:
         ok, frame = capture.read()
         if ok and frame is not None and frame.size:
             firstFrame = frame
@@ -152,64 +204,90 @@ def recordVideo(cameraIndex, videoPath, frameTimesPath, stopEvent, readyEvent, v
 
     if firstFrame is None:
         capture.release()
-        videoInfo["error"] = (
-            f"Camera index {cameraIndex} opened with backend {backend}, but no frame was received. "
-            "Close Camera/Teams/Zoom/OBS/Logitech Capture and retry. "
-            "If this is not the Logitech camera, use --camera 1 (or test 0/2)."
-        )
-        readyEvent.set()
+        videoInfo["error"] = "Camera opened but did not return a frame within 5 seconds."
+        cameraReadyEvent.set()
         return
 
     height, width = firstFrame.shape[:2]
-    fps = float(capture.get(cv2.CAP_PROP_FPS))
-    if fps <= 1.0 or fps > 120.0:
-        fps = 30.0
+    videoInfo["camera_reported_fps"] = float(capture.get(cv2.CAP_PROP_FPS))
+    videoInfo["width"] = width
+    videoInfo["height"] = height
+    videoInfo["fps"] = VIDEO_FILE_FPS
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(videoPath), fourcc, fps, (width, height))
+    writer = cv2.VideoWriter(
+        str(videoPath),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        VIDEO_FILE_FPS,
+        (width, height),
+    )
     if not writer.isOpened():
         capture.release()
         videoInfo["error"] = f"Could not open video writer for {videoPath}"
-        readyEvent.set()
+        cameraReadyEvent.set()
         return
 
-    frameCount = 0
-    firstFrameTime = None
+    cameraReadyEvent.set()
+
+    # Keep grabbing and discarding frames so the webcam is already running when T0 arrives.
+    while not stopEvent.is_set() and not startConfiguredEvent.is_set():
+        capture.read()
+
+    if stopEvent.is_set():
+        capture.release()
+        writer.release()
+        return
+
+    startPcTime = float(videoInfo["start_pc_time"])
+    frameQueue = queue.Queue()
 
     with open(frameTimesPath, "w", newline="", buffering=1) as frameTimesFile:
         frameTimesWriter = csv.writer(frameTimesFile)
-        frameTimesWriter.writerow(["frame_index", "pc_timestamp"])
+        frameTimesWriter.writerow(["frame_index", "pc_timestamp", "time_s"])
 
-        # Save the frame already captured during camera warm-up.
-        frameTime = time.time()
-        firstFrameTime = frameTime
-        videoInfo["video_start_pc_time"] = firstFrameTime
-        videoInfo["fps"] = fps
-        videoInfo["width"] = width
-        videoInfo["height"] = height
-        writer.write(firstFrame)
-        frameTimesWriter.writerow([frameCount, frameTime])
-        frameCount += 1
-        readyEvent.set()
+        def writeFrames():
+            while True:
+                item = frameQueue.get()
+                if item is None:
+                    return
+                index, timestamp, relativeTime, image = item
+                writer.write(image)
+                frameTimesWriter.writerow([index, timestamp, relativeTime])
 
+        writerThread = threading.Thread(target=writeFrames, daemon=True)
+        writerThread.start()
+
+        frameCount = 0
+        lastFrameTime = None
         consecutiveFailures = 0
+
         while not stopEvent.is_set():
             ok, frame = capture.read()
+            frameTime = time.time()
+
             if not ok or frame is None:
                 consecutiveFailures += 1
                 if consecutiveFailures >= 30:
                     videoInfo["runtime_warning"] = "Camera stopped returning frames during recording"
                     break
-                time.sleep(0.01)
                 continue
 
             consecutiveFailures = 0
-            frameTime = time.time()
-            writer.write(frame)
-            frameTimesWriter.writerow([frameCount, frameTime])
+            if frameTime < startPcTime:
+                continue
+
+            relativeTime = frameTime - startPcTime
+            frameQueue.put((frameCount, frameTime, relativeTime, frame))
+            if frameCount == 0:
+                videoInfo["first_frame_pc_time"] = frameTime
+                videoInfo["first_frame_time_s"] = relativeTime
+            lastFrameTime = frameTime
             frameCount += 1
 
+        frameQueue.put(None)
+        writerThread.join()
+
     videoInfo["frame_count"] = frameCount
+    videoInfo["last_frame_pc_time"] = lastFrameTime
     videoInfo["video_end_pc_time"] = time.time()
     capture.release()
     writer.release()
@@ -224,6 +302,7 @@ def receiveLoop(sock, pirWriter, thermalWriter, stopEvent, state):
             break
         if not chunk:
             break
+
         buffer += chunk.decode("utf-8")
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
@@ -231,7 +310,7 @@ def receiveLoop(sock, pirWriter, thermalWriter, stopEvent, state):
             if not line:
                 continue
 
-            pcTimestamp = time.time()
+            pcReceiveTime = time.time()
             try:
                 payload = json.loads(line)
             except json.JSONDecodeError:
@@ -240,7 +319,6 @@ def receiveLoop(sock, pirWriter, thermalWriter, stopEvent, state):
             status = payload.get(KEY_STATUS)
             if status == STATUS_RECORDING:
                 state["recording_status"] = payload
-                state["recording_status_pc_time"] = pcTimestamp
                 state["recordingEvent"].set()
                 continue
             if status == STATUS_STOPPED:
@@ -248,22 +326,46 @@ def receiveLoop(sock, pirWriter, thermalWriter, stopEvent, state):
                 continue
 
             messageType = payload.get(KEY_TYPE)
+            if messageType == TYPE_SYNC:
+                state["sync_reply"] = (
+                    float(payload[KEY_PC_SEND_TIME]),
+                    float(payload[KEY_ROCK_TIME]),
+                    pcReceiveTime,
+                )
+                state["syncEvent"].set()
+                continue
+
+            if messageType not in (TYPE_PIR, TYPE_THERMAL):
+                continue
+
+            rockTimestamp = float(payload[KEY_ROCK_TIMESTAMP])
+            # Convert the ROCK timestamp onto the PC clock using the single
+            # offset measured immediately before the recording.
+            pcTimestamp = rockTimestamp + float(state["clock_offset_s"])
+            relativeTime = pcTimestamp - float(state["start_pc_time"])
+
             if messageType == TYPE_PIR:
-                pirWriter.writerow([
-                    payload.get(KEY_ROCK_TIMESTAMP),
-                    pcTimestamp,
-                    payload.get(KEY_SEQ),
-                    payload.get(KEY_VOLTAGE),
-                ])
+                pirWriter.writerow(
+                    [
+                        rockTimestamp,
+                        pcTimestamp,
+                        relativeTime,
+                        payload.get(KEY_SEQ),
+                        payload.get(KEY_VOLTAGE),
+                    ]
+                )
                 state["pir_rows"] += 1
-            elif messageType == TYPE_THERMAL:
+            else:
                 frame = payload.get(KEY_FRAME, [])
-                thermalWriter.writerow([
-                    payload.get(KEY_ROCK_TIMESTAMP),
-                    pcTimestamp,
-                    payload.get(KEY_SEQ),
-                    *frame,
-                ])
+                thermalWriter.writerow(
+                    [
+                        rockTimestamp,
+                        pcTimestamp,
+                        relativeTime,
+                        payload.get(KEY_SEQ),
+                        *frame,
+                    ]
+                )
                 state["thermal_rows"] += 1
 
 
@@ -274,12 +376,12 @@ def writeMetadata(path, payload):
 
 def main():
     parser = argparse.ArgumentParser(description="PC-side data-collection controller")
-    parser.add_argument("--host", required=True, help="Rock 4C+ IP address or hostname")
+    parser.add_argument("--host", required=True, help="ROCK 4C+ IP address or hostname")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--camera", type=int, default=1, help="OpenCV camera index (default 1, intended for the Logitech USB camera on this PC)")
+    parser.add_argument("--camera", type=int, default=1, help="OpenCV camera index")
     args = parser.parse_args()
 
-    while input("Type 'start' to begin a recording: ").strip().lower() != "start":
+    while input("Type 'start' to prepare a recording: ").strip().lower() != "start":
         pass
 
     split = promptForSplit()
@@ -295,32 +397,10 @@ def main():
     videoFramesPath = recordingDir / "video_frames.csv"
     metadataPath = recordingDir / "metadata.json"
 
-    print(f"Connecting to Rock 4C+ at {args.host}:{args.port} ...")
+    print(f"Connecting to ROCK 4C+ at {args.host}:{args.port} ...")
     sock = connectWithRetry(args.host, args.port)
-    print("Connected. Waiting for both sensors to report ready...")
     readyPayload = waitForReady(sock)
-    print("Both sensors are warmed up and ready.")
-
-    # The sensor timestamps are generated on the ROCK while webcam timestamps
-    # are generated on the PC. Both machines must therefore have synchronised
-    # system clocks. This catches a badly wrong ROCK clock before data is saved.
-    rockReadyTime = readyPayload.get(KEY_ROCK_TIME)
-    clockDifference = None
-    if rockReadyTime is not None:
-        clockDifference = time.time() - float(rockReadyTime)
-        absDifference = abs(clockDifference)
-        print(f"ROCK/PC clock difference at connection: approximately {clockDifference:+.3f} s")
-        if absDifference > 0.25:
-            sock.close()
-            raise RuntimeError(
-                "ROCK and PC clocks are not synchronised closely enough (difference > 250 ms). "
-                "Synchronise both system clocks before collecting data."
-            )
-        if absDifference > 0.05:
-            print(
-                "WARNING: ROCK and PC clocks differ by more than 50 ms. "
-                "This is usable for testing, but re-synchronise them before the final dataset."
-            )
+    print("ROCK connected and sensors are ready.")
 
     frameShape = readyPayload.get(KEY_THERMAL_FRAME_SHAPE, [24, 32])
     frameLength = int(frameShape[0]) * int(frameShape[1])
@@ -329,40 +409,24 @@ def main():
     thermalFile = open(thermalPath, "w", newline="", buffering=1)
     pirWriter = csv.writer(pirFile)
     thermalWriter = csv.writer(thermalFile)
-    pirWriter.writerow(["rock_timestamp", "pc_receive_timestamp", "seq", "voltage"])
-    thermalWriter.writerow(["rock_timestamp", "pc_receive_timestamp", "seq"] + [f"pixel_{i}" for i in range(frameLength)])
-
-    videoStopEvent = threading.Event()
-    videoReadyEvent = threading.Event()
-    videoInfo = {}
-    videoThread = threading.Thread(
-        target=recordVideo,
-        args=(args.camera, videoPath, videoFramesPath, videoStopEvent, videoReadyEvent, videoInfo),
-        daemon=True,
+    pirWriter.writerow(["rock_timestamp", "pc_timestamp", "time_s", "seq", "voltage"])
+    thermalWriter.writerow(
+        ["rock_timestamp", "pc_timestamp", "time_s", "seq"]
+        + [f"pixel_{i}" for i in range(frameLength)]
     )
-    print(f"Opening camera index {args.camera} (Logitech USB camera expected)...")
-    videoThread.start()
-    cameraReady = videoReadyEvent.wait(timeout=7.0)
-    if videoInfo.get("error"):
-        pirFile.close()
-        thermalFile.close()
-        sock.close()
-        raise RuntimeError(videoInfo["error"])
-    if not cameraReady or videoInfo.get("video_start_pc_time") is None:
-        videoStopEvent.set()
-        pirFile.close()
-        thermalFile.close()
-        sock.close()
-        raise RuntimeError("Camera opened but no video frame was received within 5 seconds")
 
     state = {
         "pir_rows": 0,
         "thermal_rows": 0,
         "recording_status": None,
-        "recording_status_pc_time": None,
         "recordingEvent": threading.Event(),
         "stoppedEvent": threading.Event(),
+        "sync_reply": None,
+        "syncEvent": threading.Event(),
+        "clock_offset_s": None,
+        "start_pc_time": None,
     }
+
     receiveStopEvent = threading.Event()
     receiveThread = threading.Thread(
         target=receiveLoop,
@@ -371,76 +435,149 @@ def main():
     )
     receiveThread.start()
 
-    collectionStart = time.time()
-    sendCommand(sock, CMD_START)
-    if not state["recordingEvent"].wait(timeout=3.0):
+    videoStopEvent = threading.Event()
+    cameraReadyEvent = threading.Event()
+    startConfiguredEvent = threading.Event()
+    videoInfo = {}
+    videoThread = threading.Thread(
+        target=recordVideo,
+        args=(
+            args.camera,
+            videoPath,
+            videoFramesPath,
+            videoStopEvent,
+            cameraReadyEvent,
+            startConfiguredEvent,
+            videoInfo,
+        ),
+        daemon=True,
+    )
+    print(f"Opening and warming camera index {args.camera}...")
+    videoThread.start()
+
+    if not cameraReadyEvent.wait(timeout=7.0) or videoInfo.get("error"):
         receiveStopEvent.set()
         videoStopEvent.set()
         sock.close()
         pirFile.close()
         thermalFile.close()
-        raise RuntimeError("ROCK did not confirm recording within 3 seconds")
+        raise RuntimeError(videoInfo.get("error", "Camera did not become ready"))
+
+    # One simple clock sync immediately before recording.
+    clockSync = measureClockOffset(sock, state)
+    if clockSync is None:
+        receiveStopEvent.set()
+        videoStopEvent.set()
+        sock.close()
+        pirFile.close()
+        thermalFile.close()
+        raise RuntimeError("ROCK did not answer clock-sync messages")
+
+    clockOffset = float(clockSync["offset_s"])
+    state["clock_offset_s"] = clockOffset
+    print(
+        f"Clock relationship fixed: PC = ROCK {clockOffset:+.4f} s "
+        f"(best round trip {clockSync['round_trip_s'] * 1000:.1f} ms)"
+    )
+
+    # Give both machines enough time to receive T0 before it occurs.
+    startPcTime = time.time() + START_DELAY_SECONDS
+    startRockTime = startPcTime - clockOffset
+    state["start_pc_time"] = startPcTime
+    videoInfo["start_pc_time"] = startPcTime
+
+    sendCommand(sock, CMD_START_AT, **{KEY_ROCK_START_TIME: startRockTime})
+    startConfiguredEvent.set()
+
+    print(f"Recording will start automatically in {START_DELAY_SECONDS:.1f} s...")
+    if not state["recordingEvent"].wait(timeout=START_DELAY_SECONDS + 3.0):
+        receiveStopEvent.set()
+        videoStopEvent.set()
+        sock.close()
+        pirFile.close()
+        thermalFile.close()
+        raise RuntimeError("ROCK did not start recording at the scheduled time")
 
     print(f"Recording {split}/{runName}/{recordingName}")
+    print("Video, PIR and thermopile now share t = 0 at the scheduled start.")
+
     while input("Type 'stop' to finish this recording: ").strip().lower() != "stop":
         pass
 
-    collectionStop = time.time()
+    stopPcTime = time.time()
     sendCommand(sock, CMD_STOP)
     state["stoppedEvent"].wait(timeout=2.0)
 
-    receiveStopEvent.set()
     videoStopEvent.set()
-    receiveThread.join(timeout=2.0)
-    videoThread.join(timeout=2.0)
+    videoThread.join()
 
+    receiveStopEvent.set()
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
     sock.close()
+    receiveThread.join(timeout=2.0)
+
     pirFile.close()
     thermalFile.close()
 
     recordingStatus = state.get("recording_status") or readyPayload
+    frameCount = int(videoInfo.get("frame_count") or 0)
+    firstFrameTime = videoInfo.get("first_frame_pc_time")
+    lastFrameTime = videoInfo.get("last_frame_pc_time")
+    measuredFps = None
+    if frameCount > 1 and firstFrameTime is not None and lastFrameTime is not None:
+        duration = float(lastFrameTime) - float(firstFrameTime)
+        if duration > 0:
+            measuredFps = (frameCount - 1) / duration
+
     metadata = {
         "split": split,
         "run_name": runName,
         "recording_name": recordingName,
-        "collection_start_pc_time": collectionStart,
-        "collection_stop_pc_time": collectionStop,
         "rock_host": args.host,
         "rock_port": args.port,
         "pir_file": pirPath.name,
         "thermopile_file": thermalPath.name,
         "video_file": videoPath.name,
         "video_frames_file": videoFramesPath.name,
+        "common_start_pc_time": startPcTime,
+        "common_start_rock_time": startRockTime,
+        "stop_pc_time": stopPcTime,
+        "rock_to_pc_offset_s": clockOffset,
+        "clock_sync_round_trip_s": clockSync["round_trip_s"],
+        "clock_sync_pings": clockSync["pings"],
         "pir_rows": state["pir_rows"],
         "thermopile_rows": state["thermal_rows"],
-        "video_start_pc_time": videoInfo.get("video_start_pc_time"),
-        "video_end_pc_time": videoInfo.get("video_end_pc_time"),
-        "video_fps": videoInfo.get("fps"),
+        "video_frame_count": frameCount,
+        "first_video_frame_time_s": videoInfo.get("first_frame_time_s"),
+        "video_measured_fps": measuredFps,
+        "video_file_fps": VIDEO_FILE_FPS,
         "video_width": videoInfo.get("width"),
         "video_height": videoInfo.get("height"),
-        "video_frame_count": videoInfo.get("frame_count"),
         "camera_index": videoInfo.get("camera_index"),
         "camera_backend": videoInfo.get("camera_backend"),
         "camera_runtime_warning": videoInfo.get("runtime_warning"),
         "pir_baseline_v": recordingStatus.get(KEY_PIR_BASELINE),
-        "pir_sample_rate_hz": recordingStatus.get("pir_sample_rate_hz"),
+        "pir_sample_rate_hz": recordingStatus.get(KEY_PIR_SAMPLE_RATE),
         "thermal_rate_hz": recordingStatus.get(KEY_THERMAL_RATE),
         "thermal_frame_shape": recordingStatus.get(KEY_THERMAL_FRAME_SHAPE),
         "thermal_background": recordingStatus.get(KEY_THERMAL_BACKGROUND),
         "thermal_sigma": recordingStatus.get(KEY_THERMAL_SIGMA),
-        "recording_status_pc_time": state.get("recording_status_pc_time"),
-        "rock_pc_clock_difference_at_ready_s": clockDifference,
-        "sensor_timestamp_source": "ROCK time.time() at acquisition",
-        "video_timestamp_source": "PC time.time() per frame",
+        "timing_method": (
+            "One PC-ROCK clock offset measured immediately before recording; "
+            "both devices start at a scheduled common T0; all CSV time_s values are seconds since T0."
+        ),
     }
     writeMetadata(metadataPath, metadata)
 
     print(f"Saved {state['pir_rows']} PIR samples to {pirPath}")
     print(f"Saved {state['thermal_rows']} thermopile frames to {thermalPath}")
-    print(f"Saved video to {videoPath}")
-    print(f"Saved per-frame PC timestamps to {videoFramesPath}")
+    print(f"Saved {frameCount} video frames to {videoPath}")
+    print(f"Saved video frame times to {videoFramesPath}")
     print(f"Saved session information to {metadataPath}")
-    print("After Label Studio annotation, place labels.csv in this recording folder.")
+    print("Next step: label the video, convert the labels, then run main.py.")
 
 
 if __name__ == "__main__":

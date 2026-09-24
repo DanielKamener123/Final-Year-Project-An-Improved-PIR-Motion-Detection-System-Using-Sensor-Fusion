@@ -60,7 +60,7 @@ def labelAtTime(labels, relativeVideoTime):
 
 def preprocessPIR(pirData, initialBaseline, windowSeconds):
     processor = PIRProcessor(initialBaseline=initialBaseline, windowTime=windowSeconds)
-    timestamps = pirData["pc_timestamp"].to_numpy(dtype=np.float64)
+    timestamps = pirData["time_s"].to_numpy(dtype=np.float64)
     voltages = pirData["voltage"].to_numpy(dtype=np.float64)
     relative = np.empty_like(voltages)
 
@@ -86,7 +86,7 @@ def processThermopile(thermalData, metadata):
     pipeline.bg_model.sigma[:] = sigma
     pipeline.bg_model._initialised = True
 
-    timestamps = thermalData["pc_timestamp"].to_numpy(dtype=np.float64)
+    timestamps = thermalData["time_s"].to_numpy(dtype=np.float64)
     featureRows = []
 
     for _, row in thermalData.iterrows():
@@ -117,10 +117,6 @@ def buildRecordingDataset(recordingDir, windowSeconds, stepSeconds):
 
     with open(recordingDir / "metadata.json", "r", encoding="utf-8") as metadataFile:
         metadata = json.load(metadataFile)
-
-    videoStart = metadata.get("video_start_pc_time")
-    if videoStart is None:
-        raise ValueError(f"{recordingDir}: metadata does not contain video_start_pc_time")
 
     pirData = pd.read_csv(recordingDir / metadata.get("pir_file", "pir.csv"))
     thermalData = pd.read_csv(recordingDir / metadata.get("thermopile_file", "thermopile.csv"))
@@ -166,14 +162,12 @@ def buildRecordingDataset(recordingDir, windowSeconds, stepSeconds):
             continue
         detected, thermalFeatures = thermalRows[thermalIndex]
 
-        relativeVideoTime = fusionTime - float(videoStart)
-        if relativeVideoTime < 0:
-            continue
+        relativeVideoTime = float(fusionTime)
 
         row = {
             "recording": str(recordingDir),
-            "fusion_pc_timestamp": float(fusionTime),
-            "video_time_s": float(relativeVideoTime),
+            "fusion_time_s": float(fusionTime),
+            "video_time_s": relativeVideoTime,
             "window_seconds": float(windowSeconds),
             "thermal_detected": int(detected),
             "human": labelAtTime(labels, relativeVideoTime),
