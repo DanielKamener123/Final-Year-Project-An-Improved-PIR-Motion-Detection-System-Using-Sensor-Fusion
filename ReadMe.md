@@ -201,9 +201,7 @@ python -m Collection.labelstudio_labels \
 Example:
 
 ```bash
-python -m Collection.labelstudio_labels \
-    --export labels.json \
-    --recording Datasets/training/run_01/recording_20260924_110000
+python -m Collection.labelstudio_labels --export "Datasets/training/training_outdoors_2/recording_20260924_121936/labels.json" --recording "Datasets/training/training_outdoors_2/recording_20260924_121936"
 ```
 
 This creates:

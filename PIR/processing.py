@@ -29,18 +29,23 @@ def getFeatureVector(samples):
          magnitude exceeds the activity threshold
       3. peak_separation_s: absolute time between the dominant positive
          and negative peaks, only when both lobes exceed the threshold
+      4. mean_signal_energy: mean squared relative PIR signal in the window
 
-    A window with no meaningful PIR activity returns all zeros.
+    A window with no meaningful PIR activity returns zero for the original
+    activity features, while mean signal energy still describes the signal
+    present in the selected history window.
     """
     if not samples:
-        return np.zeros(3, dtype=np.float64)
+        return np.zeros(4, dtype=np.float64)
 
     timestamps = np.asarray([ts for ts, _ in samples], dtype=np.float64)
     values = np.asarray([value for _, value in samples], dtype=np.float64)
 
+    mean_signal_energy = float(np.mean(values ** 2))
+
     active = np.abs(values) >= float(threshold)
     if not np.any(active):
-        return np.zeros(3, dtype=np.float64)
+        return np.array([0.0, 0.0, 0.0, mean_signal_energy], dtype=np.float64)
 
     peak_to_peak = float(np.max(values) - np.min(values))
 
@@ -55,7 +60,7 @@ def getFeatureVector(samples):
         peak_separation = 0.0
 
     return np.array(
-        [peak_to_peak, activity_duration, peak_separation],
+        [peak_to_peak, activity_duration, peak_separation, mean_signal_energy],
         dtype=np.float64,
     )
 
@@ -65,6 +70,30 @@ def getFeatureNames():
         "peak_to_peak_v",
         "activity_duration_s",
         "peak_separation_s",
+        "mean_signal_energy",
+    ]
+
+
+def getCurrentFeatureVector(relativeVoltage):
+    if relativeVoltage is None or not np.isfinite(relativeVoltage):
+        return np.zeros(2, dtype=np.float64)
+
+    relativeVoltage = float(relativeVoltage)
+    pir_active = int(abs(relativeVoltage) >= float(threshold))
+
+    if not pir_active:
+        return np.zeros(2, dtype=np.float64)
+
+    return np.array(
+        [pir_active, relativeVoltage],
+        dtype=np.float64,
+    )
+
+
+def getCurrentFeatureNames():
+    return [
+        "active",
+        "current_relative_voltage",
     ]
 
 
@@ -214,7 +243,7 @@ if __name__ == "__main__":
 
     processor = PIRProcessor(sample_queue)
 
-    print("PIR pipeline: rolling buffer with peak-to-peak amplitude, activity duration, and peak separation")
+    print("PIR pipeline: rolling buffer with peak-to-peak amplitude, activity duration, peak separation, and mean signal energy")
     print("Keep the scene empty during background calibration.")
     print("Threshold default is not calibrated for this PCB.")
     acquisition.start()
