@@ -8,38 +8,24 @@ from PIR.processing import (
     PIRProcessor,
     getCurrentFeatureNames,
     getCurrentFeatureVector,
-    getFeatureNames,
-    getFeatureVector,
+    getHistoryFeatureNames,
+    getHistoryFeatureVector,
 )
 from Thermopile.thermopile_pipeline import ThermopilePipeline
 
 # Current Thermopile Features Come From The Latest Valid Frame
 THERMAL_CURRENT_FEATURE_NAMES = [
-    "pixel_count",
-    "width",
-    "height",
-    "centroid_row",
-    "centroid_col",
-    "mean_temperature_difference",
-    "max_temperature_difference",
-    "virtual_position_x",
-    "horizontal_pixels_covered",
-    "vertical_pixels_covered",
     "number_of_blobs",
     "total_foreground_pixels",
+    "pixel_count",
+    "mean_temperature_difference",
+    "max_temperature_difference",
 ]
 
 # Historical Thermopile Features Are Calculated Over The Shared History Window
 THERMAL_HISTORY_FEATURE_NAMES = [
-    "row_displacement",
-    "col_displacement",
-    "displacement_px",
-    "normalised_displacement",
-    "cumulative_displacement_px",
-    "horizontal_pixels_traversed",
-    "vertical_pixels_traversed",
-    "horizontal_direction",
-    "vertical_direction",
+    "path_length_px",
+    "net_displacement_px",
     "presence_ratio",
 ]
 
@@ -95,15 +81,10 @@ def flattenDetection(detection):
     return {
         "track_id": int(features.track_id),
         "pixel_count": float(features.pixel_count),
-        "width": float(features.width),
-        "height": float(features.height),
         "centroid_row": float(features.centroid[0]),
         "centroid_col": float(features.centroid[1]),
         "mean_temperature_difference": float(features.mean_temperature_difference),
         "max_temperature_difference": float(features.max_temperature_difference),
-        "virtual_position_x": float(features.virtual_position_x),
-        "horizontal_pixels_covered": float(features.horizontal_pixels_covered),
-        "vertical_pixels_covered": float(features.vertical_pixels_covered),
     }
 
 
@@ -134,16 +115,10 @@ def processThermopile(thermalData, metadata):
             "detections": flattened,
             "number_of_blobs": len(flattened),
             "total_foreground_pixels": float(sum(detection["pixel_count"] for detection in flattened)),
+            "primary_track_id": pipeline.primary_track_id,
         })
 
     return timestamps, frameRows
-
-
-def largestDetection(frameRow):
-    detections = frameRow["detections"]
-    if not detections:
-        return None
-    return max(detections, key=lambda detection: detection["pixel_count"])
 
 
 def thermalFeaturesAtTime(thermalTimestamps, thermalRows, fusionTime, windowSeconds, thermalValid):
@@ -154,36 +129,32 @@ def thermalFeaturesAtTime(thermalTimestamps, thermalRows, fusionTime, windowSeco
         return False, features
 
     currentFrame = thermalRows[thermalIndex]
-    currentPrimary = largestDetection(currentFrame) if thermalValid else None
+    selectedTrackId = currentFrame["primary_track_id"]
+
+    currentPrimary = None
+    if thermalValid and selectedTrackId is not None:
+        matching = [
+            detection
+            for detection in currentFrame["detections"]
+            if int(detection["track_id"]) == int(selectedTrackId)
+        ]
+        if matching:
+            currentPrimary = matching[0]
 
     # Current Frame Features
-    if currentPrimary is not None:
-        for name in THERMAL_CURRENT_FEATURE_NAMES:
-            if name == "number_of_blobs":
-                features[name] = float(currentFrame["number_of_blobs"])
-            elif name == "total_foreground_pixels":
-                features[name] = float(currentFrame["total_foreground_pixels"])
-            else:
-                features[name] = float(currentPrimary[name])
-    elif thermalValid:
+    if thermalValid:
         features["number_of_blobs"] = float(currentFrame["number_of_blobs"])
         features["total_foreground_pixels"] = float(currentFrame["total_foreground_pixels"])
 
-    # Use The Current Primary Track For History. If There Is No Current Blob,
-    # Use The Most Recent Primary Track Still Present In The History Window.
+        if currentPrimary is not None:
+            features["pixel_count"] = float(currentPrimary["pixel_count"])
+            features["mean_temperature_difference"] = float(currentPrimary["mean_temperature_difference"])
+            features["max_temperature_difference"] = float(currentPrimary["max_temperature_difference"])
+
+    # Use The Current Primary Track For History
     historyStart = np.searchsorted(thermalTimestamps, fusionTime - windowSeconds, side="right")
     historyEnd = thermalIndex + 1
     historyIndices = list(range(historyStart, historyEnd))
-
-    selectedTrackId = None
-    if currentPrimary is not None:
-        selectedTrackId = int(currentPrimary["track_id"])
-    else:
-        for index in reversed(historyIndices):
-            primary = largestDetection(thermalRows[index])
-            if primary is not None:
-                selectedTrackId = int(primary["track_id"])
-                break
 
     if selectedTrackId is None or not historyIndices:
         return currentPrimary is not None, features
@@ -195,7 +166,7 @@ def thermalFeaturesAtTime(thermalTimestamps, thermalRows, fusionTime, windowSeco
         matching = [
             detection
             for detection in thermalRows[index]["detections"]
-            if int(detection["track_id"]) == selectedTrackId
+            if int(detection["track_id"]) == int(selectedTrackId)
         ]
         if not matching:
             continue
@@ -213,30 +184,17 @@ def thermalFeaturesAtTime(thermalTimestamps, thermalRows, fusionTime, windowSeco
 
     rowDisplacement = float(last["centroid_row"] - first["centroid_row"])
     colDisplacement = float(last["centroid_col"] - first["centroid_col"])
-    displacement = float(np.hypot(rowDisplacement, colDisplacement))
+    netDisplacement = float(np.hypot(rowDisplacement, colDisplacement))
 
-    cumulativeDisplacement = 0.0
-    horizontalTraversed = 0.0
-    verticalTraversed = 0.0
+    pathLength = 0.0
 
     for (_, previous), (_, current) in zip(trackHistory[:-1], trackHistory[1:]):
         dr = float(current["centroid_row"] - previous["centroid_row"])
         dc = float(current["centroid_col"] - previous["centroid_col"])
-        cumulativeDisplacement += float(np.hypot(dr, dc))
-        horizontalTraversed += abs(dc)
-        verticalTraversed += abs(dr)
+        pathLength += float(np.hypot(dr, dc))
 
-    normalisingHeight = max(float(last["height"]), 1.0)
-
-    features["row_displacement"] = rowDisplacement
-    features["col_displacement"] = colDisplacement
-    features["displacement_px"] = displacement
-    features["normalised_displacement"] = float(displacement / normalisingHeight)
-    features["cumulative_displacement_px"] = float(cumulativeDisplacement)
-    features["horizontal_pixels_traversed"] = float(horizontalTraversed)
-    features["vertical_pixels_traversed"] = float(verticalTraversed)
-    features["horizontal_direction"] = float(np.sign(colDisplacement))
-    features["vertical_direction"] = float(np.sign(rowDisplacement))
+    features["path_length_px"] = float(pathLength)
+    features["net_displacement_px"] = float(netDisplacement)
 
     return currentPrimary is not None, features
 
@@ -284,7 +242,7 @@ def buildRecordingDataset(recordingDir, windowSeconds, stepSeconds, maxSensorAge
     maxPirAge = maxSensorAgePeriods / pirRate if pirRate > 0 else np.inf
     maxThermalAge = maxSensorAgePeriods / thermalRate if thermalRate > 0 else np.inf
 
-    pirHistoryNames = getFeatureNames()
+    pirHistoryNames = getHistoryFeatureNames()
     pirCurrentNames = getCurrentFeatureNames()
     thermalNames = thermalFeatureNames()
     rows = []
@@ -297,7 +255,7 @@ def buildRecordingDataset(recordingDir, windowSeconds, stepSeconds, maxSensorAge
             continue
 
         pirSamples = list(zip(pirTimestamps[pirStart:pirEnd], pirRelative[pirStart:pirEnd]))
-        pirHistoryVector = np.asarray(getFeatureVector(pirSamples), dtype=np.float64)
+        pirHistoryVector = np.asarray(getHistoryFeatureVector(pirSamples), dtype=np.float64)
         if len(pirHistoryVector) != len(pirHistoryNames):
             raise ValueError(
                 "PIR getFeatureVector() and getFeatureNames() return different lengths. "

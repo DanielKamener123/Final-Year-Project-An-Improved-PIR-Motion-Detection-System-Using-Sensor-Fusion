@@ -7,7 +7,7 @@ import matplotlib.patches as patches
 from Thermopile.processing import (
     getFrame, getDetections, warmUp,
     getBackground, getSigma, getRawZ, getSmoothedZ, getMask,
-    getThreshold, getSceneTemp,
+    getThreshold, getSceneTemp, getPrimaryTrackId,
 )
 
 WIDTH = 32
@@ -217,6 +217,7 @@ class DebugDashboard:
             f"Scene temp:  {getSceneTemp():.2f} C",
             f"Threshold:   {getThreshold():.2f}",
             f"Detections:  {len(detections)}",
+            f"Primary:     {getPrimaryTrackId()}",
             "",
         ]
 
@@ -248,60 +249,24 @@ class DebugDashboard:
 
             # Display whatever fields the current BlobFeatures class contains.
             track_id = getattr(features, "track_id", None)
-            virtual_position_x = getattr(features, "virtual_position_x", None)
-            horizontal_pixels_traversed = getattr(features, "horizontal_pixels_traversed", None)
-            vertical_pixels_traversed = getattr(features, "vertical_pixels_traversed", None)
-            horizontal_pixels_covered = getattr(features, "horizontal_pixels_covered", None)
-            vertical_pixels_covered = getattr(features, "vertical_pixels_covered", None)
-            horizontal_direction = getattr(features, "horizontal_direction", None)
-            vertical_direction = getattr(features, "vertical_direction", None)
+            track_age_frames = getattr(features, "track_age_frames", None)
+            mean_temperature_difference = getattr(features, "mean_temperature_difference", None)
+            max_temperature_difference = getattr(features, "max_temperature_difference", None)
 
             if track_id is not None:
                 lines.append(f"  track_id={track_id}")
 
-            if virtual_position_x is not None:
-                lines.append(f"  virtual_position_x={virtual_position_x:.2f}")
+            if track_age_frames is not None:
+                lines.append(f"  track_age_frames={track_age_frames}")
 
-            if horizontal_pixels_traversed is not None:
+            if mean_temperature_difference is not None:
                 lines.append(
-                    f"  horizontal_pixels_traversed={horizontal_pixels_traversed:.2f}"
+                    f"  mean_temperature_difference={mean_temperature_difference:.2f}"
                 )
 
-            if vertical_pixels_traversed is not None:
+            if max_temperature_difference is not None:
                 lines.append(
-                    f"  vertical_pixels_traversed={vertical_pixels_traversed:.2f}"
-                )
-
-            if horizontal_pixels_covered is not None:
-                lines.append(
-                    f"  horizontal_pixels_covered={horizontal_pixels_covered}"
-                )
-
-            if vertical_pixels_covered is not None:
-                lines.append(
-                    f"  vertical_pixels_covered={vertical_pixels_covered}"
-                )
-
-            if horizontal_direction is not None:
-                horizontal_direction_text = {
-                    -1: "left",
-                    0: "stationary",
-                    1: "right",
-                }.get(horizontal_direction, str(horizontal_direction))
-
-                lines.append(
-                    f"  horizontal_direction={horizontal_direction_text}"
-                )
-
-            if vertical_direction is not None:
-                vertical_direction_text = {
-                    -1: "up",
-                    0: "stationary",
-                    1: "down",
-                }.get(vertical_direction, str(vertical_direction))
-
-                lines.append(
-                    f"  vertical_direction={vertical_direction_text}"
+                    f"  max_temperature_difference={max_temperature_difference:.2f}"
                 )
 
             lines.append("")

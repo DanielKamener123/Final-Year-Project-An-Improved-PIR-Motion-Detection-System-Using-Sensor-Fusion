@@ -4,76 +4,61 @@ from collections import deque
 
 import numpy as np
 
-# Warm Up Time (seconds)
-warmupTime = 10.0
+# Warm Up Time
+warmupTime = 10
 
 # How Quickly System Adapts To Background Changes While System Is Idle 
 alpha = 0.01
 
-# Threshold Relative To Background
 threshold = 0.2
+rollingWindow = 1
+historyBuffer = 10
 
-# Default Rolling Window Time Used For Live Feature Extraction
-defaultWindowTime = 1.0
-
-# PIR History Is Kept For Twice The Active Feature Window
-historyWindowMultiplier = 2.0
-
-
-def getFeatureVector(samples):
-    """Return the compact PIR temporal feature vector for one rolling window.
-
-    Features:
-      1. peak_to_peak_v: max(signal) - min(signal)
-      2. activity_duration_s: time from the first to last sample whose
-         magnitude exceeds the activity threshold
-      3. peak_separation_s: absolute time between the dominant positive
-         and negative peaks, only when both lobes exceed the threshold
-      4. mean_signal_energy: mean squared relative PIR signal in the window
-
-    A window with no meaningful PIR activity returns zero for the original
-    activity features, while mean signal energy still describes the signal
-    present in the selected history window.
-    """
+# Get The Context Features From The Last PIR Samples In History Buffer
+def getHistoryFeatureVector(samples):
+    # Check For No Samples
     if not samples:
-        return np.zeros(4, dtype=np.float64)
+        return np.zeros(4)
 
-    timestamps = np.asarray([ts for ts, _ in samples], dtype=np.float64)
-    values = np.asarray([value for _, value in samples], dtype=np.float64)
+    # Gets Timestamps and Values from Samples In Seperate Arrays
+    timestamps = np.asarray([ts for ts, _ in samples])
+    values = np.asarray([value for _, value in samples])
 
-    mean_signal_energy = float(np.mean(values ** 2))
+    # Calculate Mean Signal Energy (Feature 4)
+    meanSignalEnergy = float(np.mean(values ** 2))
 
+    # Check For Active Samples Otherwise Return Empty Feature Vector
     active = np.abs(values) >= float(threshold)
     if not np.any(active):
-        return np.array([0.0, 0.0, 0.0, mean_signal_energy], dtype=np.float64)
+        return np.array([0.0, 0.0, 0.0, meanSignalEnergy])
 
-    peak_to_peak = float(np.max(values) - np.min(values))
+    # Calculate Peak To Peak (Feature 1)
+    peakToPeak = float(np.max(values) - np.min(values))
 
-    active_indices = np.flatnonzero(active)
-    activity_duration = float(timestamps[active_indices[-1]] - timestamps[active_indices[0]])
+    # Calculate Activity Duration (Feature 2)
+    timeActive = np.flatnonzero(active)
+    activityDuration = float(timestamps[timeActive[-1]] - timestamps[timeActive[0]])
 
-    positive_index = int(np.argmax(values))
-    negative_index = int(np.argmin(values))
-    if values[positive_index] >= threshold and values[negative_index] <= -threshold:
-        peak_separation = float(abs(timestamps[positive_index] - timestamps[negative_index]))
+    # Calculate Peak Separation (Feature 3)
+    maxPeakIndex = int(np.argmax(values))
+    minPeakIndex = int(np.argmin(values))
+    if values[maxPeakIndex] >= threshold and values[minPeakIndex] <= -threshold:
+        peak_separation = float(abs(timestamps[maxPeakIndex] - timestamps[minPeakIndex]))
     else:
         peak_separation = 0.0
 
-    return np.array(
-        [peak_to_peak, activity_duration, peak_separation, mean_signal_energy],
-        dtype=np.float64,
-    )
+    return np.array([peakToPeak, activityDuration, peak_separation, meanSignalEnergy])
 
 
-def getFeatureNames():
+def getHistoryFeatureNames():
     return [
-        "peak_to_peak_v",
-        "activity_duration_s",
-        "peak_separation_s",
-        "mean_signal_energy",
+        "peakToPeak",
+        "activityDuration",
+        "peakSeparation",
+        "meanSignalEnergy",
     ]
 
-
+# Get Current Features From Current Sample
 def getCurrentFeatureVector(relativeVoltage):
     if relativeVoltage is None or not np.isfinite(relativeVoltage):
         return np.zeros(2, dtype=np.float64)
@@ -93,19 +78,19 @@ def getCurrentFeatureVector(relativeVoltage):
 def getCurrentFeatureNames():
     return [
         "active",
-        "current_relative_voltage",
+        "currentRelativeVoltage",
     ]
 
 
 class PIRProcessor:
-    def __init__(self, sampleQueue: queue.Queue | None = None, initialBaseline=None, windowTime=defaultWindowTime):
+    def __init__(self, sampleQueue: queue.Queue | None = None, initialBaseline=None, windowTime=rollingWindow):
         if windowTime <= 0:
             raise ValueError("windowTime must be greater than zero")
 
         self.sampleQueue = sampleQueue
         self.outputQueue = queue.Queue(maxsize=4096)
         self.windowTime = float(windowTime)
-        self.maxHistoryTime = historyWindowMultiplier * self.windowTime
+        self.maxHistoryTime = historyBuffer
 
         # Baseline Voltage
         self.baselineVoltage = 0.0 if initialBaseline is None else float(initialBaseline)
@@ -209,7 +194,7 @@ class PIRProcessor:
             finally:
                 self.sampleQueue.task_done()
 
-    def getWindowSamples(self, windowTime=defaultWindowTime, endTime=None):
+    def getWindowSamples(self, windowTime=rollingWindow, endTime=None):
         if windowTime <= 0:
             raise ValueError("windowTime must be greater than zero")
 
@@ -224,9 +209,9 @@ class PIRProcessor:
         startTime = endTime - float(windowTime)
         return [(ts, value) for ts, value in samples if startTime < ts <= endTime]
 
-    def snapshot(self, windowTime=defaultWindowTime, endTime=None):
+    def snapshot(self, windowTime=rollingWindow, endTime=None):
         samples = self.getWindowSamples(windowTime=windowTime, endTime=endTime)
-        return getFeatureVector(samples).tolist()
+        return getHistoryFeatureVector(samples).tolist()
 
     def getBaseline(self):
         with self.stateLock:
@@ -254,7 +239,7 @@ if __name__ == "__main__":
             ts, v, relative = processor.outputQueue.get()
             if processor.initialised and int(ts * 2) != int((ts - 1.0 / sampleRateHz) * 2):
                 np.set_printoptions(precision=4, suppress=True)
-                print(processor.snapshot(defaultWindowTime))
+                print(processor.snapshot(rollingWindow))
     except KeyboardInterrupt:
         processor.stop()
         acquisition.stop()

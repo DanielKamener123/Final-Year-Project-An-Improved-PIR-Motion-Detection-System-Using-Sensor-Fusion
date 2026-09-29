@@ -10,15 +10,12 @@ from PIR.interface import PIRAcquisition, i2cBusNumber, i2cAddress, sampleRateHz
 from PIR.processing import (
     PIRProcessor,
     threshold,
-    defaultWindowTime,
-    getFeatureNames,
+    rollingWindow,
+    getHistoryFeatureNames,
 )
 
-# --- signal rail limits for the 0-3.3 V PIR frontend output ---
 RAIL_LOW_V = 0.05
 RAIL_HIGH_V = 3.25
-
-# --- how much history to show on the scrolling plot ---
 DISPLAY_WINDOW_S = 15.0
 
 
@@ -31,14 +28,7 @@ def main():
     acquisition.start()
     processor.start()
 
-    feature_names = getFeatureNames()
-
-    print(f"Requested {sampleRateHz} Hz -> ADS1115 set to {acquisition.actualADCRateHz} SPS")
-    print(f"I2C bus {i2cBusNumber}, address 0x{i2cAddress:02X}")
-    print(
-        "Live PIR features from the last "
-        f"{defaultWindowTime:.2f} s: peak-to-peak amplitude, activity duration, peak separation\n"
-    )
+    feature_names = getHistoryFeatureNames()
 
     # --- rolling buffers for plotting ---
     maxlen = int(DISPLAY_WINDOW_S * sampleRateHz * 1.5) + 10
@@ -78,7 +68,7 @@ def main():
     ax_features.set_xticks(range(len(feature_names)), feature_names, rotation=15, ha="right")
     ax_features.set_ylim(0, 1)
     ax_features.set_ylabel("feature value")
-    ax_features.set_title(f"Live PIR temporal features ({defaultWindowTime:.2f} s rolling window)")
+    ax_features.set_title(f"Live PIR temporal features ({rollingWindow:.2f} s rolling window)")
 
     status_text = ax_wave.text(
         0.01, 0.95, "", transform=ax_wave.transAxes, va="top", fontsize=8,
@@ -121,7 +111,7 @@ def main():
             if (v_arr[-50:] < RAIL_LOW_V).any() or (v_arr[-50:] > RAIL_HIGH_V).any():
                 clip_warned = True
 
-        feature_values = np.asarray(processor.snapshot(defaultWindowTime), dtype=np.float64)
+        feature_values = np.asarray(processor.snapshot(rollingWindow), dtype=np.float64)
         top = max(float(feature_values.max()), 1e-6)
         ax_features.set_ylim(0, top * 1.2)
         for bar, value in zip(feature_bars, feature_values):
@@ -149,15 +139,7 @@ def main():
     # Keep A Reference - Otherwise The Animation Is Garbage Collected And The Plot Never Updates
     ani = animation.FuncAnimation(fig, update, interval=200, blit=False, cache_frame_data=False)
     plt.tight_layout()
-
-    try:
-        plt.show()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        processor.stop()
-        acquisition.stop()
-
+    plt.show()
 
 if __name__ == "__main__":
     main()

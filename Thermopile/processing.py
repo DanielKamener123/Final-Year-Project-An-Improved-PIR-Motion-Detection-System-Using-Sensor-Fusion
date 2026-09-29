@@ -46,6 +46,11 @@ def getDetections():
     """
     return LatestDetections
 
+
+# Current Primary Track ID
+def getPrimaryTrackId():
+    return Pipeline.primary_track_id
+
 # Debugging
 
 # Current background array
