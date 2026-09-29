@@ -1,4 +1,3 @@
-import argparse
 import json
 import queue
 import socket
@@ -11,7 +10,6 @@ from Collection.protocol import (
     CMD_START_AT,
     CMD_STOP,
     CMD_SYNC,
-    DEFAULT_PORT,
     KEY_FRAME,
     KEY_PC_SEND_TIME,
     KEY_PIR_BASELINE,
@@ -44,13 +42,14 @@ THERMAL_FRAME_SIZE = 24 * 32
 USE_THERMOPILE = False
 thermopile = None
 
-
+# Converts Dictionary to JSON and Sends
 def sendJson(conn, payload, sendLock):
     line = json.dumps(payload, separators=(",", ":")) + "\n"
+    # Makes Sure Only One Thread Sends At A Time
     with sendLock:
         conn.sendall(line.encode("utf-8"))
 
-
+# Removes All PIR Samples From Queue To Start Fresh Recording
 def drainQueue(q):
     while True:
         try:
@@ -59,7 +58,7 @@ def drainQueue(q):
             return
 
 
-def calibrationPayload(processor, status):
+def calibrationData(processor, status):
     payload = {
         KEY_STATUS: status,
         KEY_ROCK_TIME: time.time(),
@@ -68,6 +67,7 @@ def calibrationPayload(processor, status):
         KEY_THERMAL_RATE: THERMAL_RATE_HZ,
     }
 
+    #TODO: REMOVE THIS WHEN THERMOPILE IS WORKING
     if USE_THERMOPILE:
         payload.update(
             {
@@ -86,32 +86,38 @@ def calibrationPayload(processor, status):
         )
     return payload
 
-
+# Send PIR Data
 def pirStreamLoop(conn, processor, stopEvent, sendLock):
-    seq = 0
+    seqIndex = 0
+
+    # While Stop Condition Is Not Set
     while not stopEvent.is_set():
         try:
-            rockTimestamp, voltage, _relative = processor.outputQueue.get(timeout=0.5)
+            # Get Timestamp and Data From PIR Queue
+            rockTimestamp, voltage = processor.outputQueue.get(timeout=0.5)
         except queue.Empty:
             continue
 
         try:
+            # Send PIR Data To PC
             sendJson(
                 conn,
                 {
                     KEY_TYPE: TYPE_PIR,
-                    KEY_SEQ: seq,
+                    KEY_SEQ: seqIndex,
                     KEY_ROCK_TIMESTAMP: float(rockTimestamp),
                     KEY_VOLTAGE: float(voltage),
                 },
                 sendLock,
             )
+
+        # Stop Sending Frames If The PC Disconnects Or If Error Occurs
         except OSError:
             stopEvent.set()
             break
-        seq += 1
+        seqIndex += 1
 
-
+# TODO: REMOVE THIS WHEN THERMOPILE IS WORKING
 def dummyThermopileStreamLoop(conn, stopEvent, sendLock):
     seq = 0
     period = 1.0 / THERMAL_RATE_HZ
@@ -143,71 +149,89 @@ def dummyThermopileStreamLoop(conn, stopEvent, sendLock):
         if remaining > 0:
             stopEvent.wait(remaining)
 
-
+# TODO: RENAME THIS WHEN THERMOPILE IS WORKING
 def realThermopileStreamLoop(conn, stopEvent, sendLock):
-    seq = 0
+    seqIndex = 0
+
+    # Keep Sending Frames Until Stop Condition Is Set
     while not stopEvent.is_set():
+        # Get Raw Frame Data
         rawFrame = thermopile.getRawFrame()
+
         # Timestamp immediately after the complete frame has been read.
         rockTimestamp = time.time()
 
         try:
+            # Send Thermopile Data To PC
             sendJson(
                 conn,
                 {
                     KEY_TYPE: TYPE_THERMAL,
-                    KEY_SEQ: seq,
+                    KEY_SEQ: seqIndex,
                     KEY_ROCK_TIMESTAMP: rockTimestamp,
                     KEY_FRAME: [float(value) for value in rawFrame],
                 },
                 sendLock,
             )
+
+        # Stop Sending Frames If The PC Disconnects Or If Error Occurs
         except OSError:
             stopEvent.set()
             break
-        seq += 1
+        seqIndex += 1
 
-
+# Wait For Start At Or Stop Command From PC
 def waitForCommand(conn, expected, sendLock):
-    """Wait for one command while still answering PC/ROCK clock-sync pings."""
+    # TCP Stream Buffer
     buffer = ""
+
     while True:
         try:
+            # Read Incoming Bytes
             chunk = conn.recv(1024)
+        # Stop If The PC Disconnects Or If Error Occurs
         except OSError:
             return None
         if not chunk:
             return None
 
+        # Add Chunk To Buffer
         buffer += chunk.decode("utf-8")
+
+        # Go Through Each Line In Buffer
         while "\n" in buffer:
+            # Split And Strip Buffer
             message, buffer = buffer.split("\n", 1)
             message = message.strip()
             if not message:
                 continue
 
             try:
-                payload = json.loads(message)
+                dataRecieved = json.loads(message)
             except json.JSONDecodeError:
                 continue
 
-            command = payload.get("cmd")
+            # Look For Command Type
+            command = dataRecieved.get("cmd")
+
+            # If The PC Sends SYNC Command, Reply With SYNC Response
             if command == CMD_SYNC:
                 sendJson(
                     conn,
                     {
                         KEY_TYPE: TYPE_SYNC,
-                        KEY_PC_SEND_TIME: payload.get(KEY_PC_SEND_TIME),
+                        KEY_PC_SEND_TIME: dataRecieved.get(KEY_PC_SEND_TIME),
                         KEY_ROCK_TIME: time.time(),
                     },
                     sendLock,
                 )
                 continue
 
+            # Otherwise Return The Data If The Command Matches The Expected Command
             if command == expected:
-                return payload
+                return dataRecieved
 
-
+# Wait Until The Rock Time Reaches The Target Time To Start Capturing Data
 def waitUntilRockTime(targetTime):
     while True:
         remaining = targetTime - time.time()
@@ -215,13 +239,9 @@ def waitUntilRockTime(targetTime):
             return
         time.sleep(min(remaining, 0.02))
 
-
+# TODO: FIX This Function To Use The Thermopile Module When It Is Working
 def main():
     global thermopile
-
-    parser = argparse.ArgumentParser(description="ROCK 4C+ data-collection agent")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    args = parser.parse_args()
 
     if USE_THERMOPILE:
         print("Warming up thermopile")
@@ -232,58 +252,59 @@ def main():
     else:
         print("Thermopile dummy mode enabled")
 
-    print("Starting PIR acquisition")
+
+    print("Starting PIR")
     acquisitionQueue = queue.Queue(maxsize=4096)
     acquisition = PIRAcquisition(acquisitionQueue)
     processor = PIRProcessor(acquisitionQueue)
     acquisition.start()
     processor.start()
 
-    print("Warming up PIR - keep the scene empty")
+    print("Warming up PIR")
     while not processor.initialised:
         time.sleep(0.2)
     print("Sensors ready")
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("0.0.0.0", args.port))
+    server.bind(("0.0.0.0", 5050))
     server.listen(1)
-    print(f"Listening on port {args.port} for the PC...")
+    print(f"Listening for PC...")
 
     try:
         while True:
-            conn, addr = server.accept()
+            conn = server.accept()
             sendLock = threading.Lock()
-            print(f"PC connected from {addr}")
+            print(f"PC connected")
 
             with conn:
-                sendJson(conn, calibrationPayload(processor, STATUS_READY), sendLock)
+                sendJson(conn, calibrationData(processor, STATUS_READY), sendLock)
 
                 startPayload = waitForCommand(conn, CMD_START_AT, sendLock)
                 if startPayload is None:
                     continue
 
                 rockStartTime = float(startPayload[KEY_ROCK_START_TIME])
-                print("Start scheduled. Waiting for common T0...")
+                print("Start scheduled")
                 waitUntilRockTime(rockStartTime)
 
-                # Remove all PIR samples collected before T0. The next sample placed
-                # in the queue is therefore the first recorded PIR sample.
                 drainQueue(processor.outputQueue)
-
                 stopEvent = threading.Event()
-                sendJson(conn, calibrationPayload(processor, STATUS_RECORDING), sendLock)
+                sendJson(conn, calibrationData(processor, STATUS_RECORDING), sendLock)
 
                 pirThread = threading.Thread(
                     target=pirStreamLoop,
                     args=(conn, processor, stopEvent, sendLock),
                     daemon=True,
                 )
+
+                # TODO: REMOVE THIS WHEN THERMOPILE IS WORKING
                 thermalThread = threading.Thread(
                     target=realThermopileStreamLoop if USE_THERMOPILE else dummyThermopileStreamLoop,
                     args=(conn, stopEvent, sendLock),
                     daemon=True,
                 )
+
                 pirThread.start()
                 thermalThread.start()
                 print("Collection started")

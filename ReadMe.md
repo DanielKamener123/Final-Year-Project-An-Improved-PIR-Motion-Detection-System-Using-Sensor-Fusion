@@ -19,27 +19,15 @@ All later labelling and fusion uses `time_s`, so the rest of the project does no
 On the ROCK, open a terminal in the project directory and run:
 
 ```bash
-python -m Collection.rock_agent --port 5050
+python -m Collection.rock_agent
 ```
-
-The ROCK will:
-
-1. Warm up the thermopile if the real thermopile is enabled.
-2. Start the PIR acquisition.
-3. Wait for the PIR baseline warm-up to finish.
-4. Open port `5050`.
-5. Wait for the PC.
-
-The PIR acquisition continues running in the background, but samples collected before the scheduled recording start are discarded.
-
----
 
 ## 2. Start Data Collection on the PC
 
 On the PC, run:
 
 ```bash
-python -m Collection.pc_collector --host <ROCK_IP>
+python -m Collection.pc_agent --host <ROCK_IP>
 ```
 
 Example:
@@ -193,7 +181,7 @@ The exact sensor and video timestamps do not have to be perfect to the milliseco
 Export the Label Studio task as JSON and run:
 
 ```bash
-python -m Collection.labelstudio_labels \
+python -m Collection.labels \
     --export <LABEL_EXPORT.json> \
     --recording <RECORDING_FOLDER>
 ```
@@ -201,7 +189,7 @@ python -m Collection.labelstudio_labels \
 Example:
 
 ```bash
-python -m Collection.labelstudio_labels --export "Datasets/training/training_outdoors_2/recording_20260924_121936/labels.json" --recording "Datasets/training/training_outdoors_2/recording_20260924_121936"
+python -m Collection.labels --export "Datasets/training/training_outdoors_2/recording_20260924_121936/labels.json" --recording "Datasets/training/training_outdoors_2/recording_20260924_121936"
 ```
 
 This creates:

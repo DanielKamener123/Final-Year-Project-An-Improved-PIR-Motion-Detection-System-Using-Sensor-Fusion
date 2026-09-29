@@ -40,14 +40,18 @@ from Collection.protocol import (
 
 DATASET_ROOT = Path("Datasets")
 VIDEO_FILE_FPS = 30.0
+
+# How Many Clock SYNC Requests
 CLOCK_SYNC_PINGS = 10
+
+# How Long To Wait For Both Systems To Start Recording Data
 START_DELAY_SECONDS = 2.0
 
-
+# Sends Commands To The Rock
 def sendCommand(sock, command, **fields):
     sock.sendall((json.dumps({"cmd": command, **fields}) + "\n").encode("utf-8"))
 
-
+# Repeatedly Tries To Connect To The Rock Until It Succeeds
 def connectWithRetry(host, port):
     while True:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -56,16 +60,16 @@ def connectWithRetry(host, port):
             return sock
         except OSError:
             sock.close()
-            print("ROCK not ready yet, retrying...")
+            print("ROCK not connected, retrying...")
             time.sleep(1.0)
 
-
+# Waits For Rock To Be Ready (Sensors Calibrated)
 def waitForReady(sock):
     buffer = ""
     while True:
         chunk = sock.recv(4096)
         if not chunk:
-            raise ConnectionError("ROCK closed the connection before sending ready status")
+            raise ConnectionError("Rock closed the connection before sending ready status")
         buffer += chunk.decode("utf-8")
 
         while "\n" in buffer:
@@ -73,13 +77,12 @@ def waitForReady(sock):
             line = line.strip()
             if not line:
                 continue
-            payload = json.loads(line)
-            if payload.get(KEY_STATUS) == STATUS_READY:
-                return payload
+            dataRecieved = json.loads(line)
+            if dataRecieved.get(KEY_STATUS) == STATUS_READY:
+                return dataRecieved
 
-
+# TODO: Look Through - IMPORTANT
 def measureClockOffset(sock, state, pings=CLOCK_SYNC_PINGS):
-    """Estimate PC time - ROCK time using short round-trip sync messages."""
     samples = []
     for _ in range(pings):
         state["syncEvent"].clear()
@@ -91,7 +94,6 @@ def measureClockOffset(sock, state, pings=CLOCK_SYNC_PINGS):
     if not samples:
         return None
 
-    # The shortest round-trip sample has the least uncertainty from network delay.
     pcSend, rockTime, pcReceive = min(samples, key=lambda sample: sample[2] - sample[0])
     return {
         "offset_s": 0.5 * (pcSend + pcReceive) - rockTime,
@@ -99,8 +101,8 @@ def measureClockOffset(sock, state, pings=CLOCK_SYNC_PINGS):
         "pings": len(samples),
     }
 
-
-def promptForSplit():
+# Get Data Type
+def promptDataType():
     while True:
         answer = input("Is this training or testing data? [training/testing]: ").strip().lower()
         if answer in ("train", "training"):
@@ -109,12 +111,6 @@ def promptForSplit():
             return "testing"
         print("Please type 'training' or 'testing'.")
 
-
-def sanitiseName(name):
-    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in name.strip())
-    return cleaned.strip("_")
-
-
 def chooseRun(split):
     splitDir = DATASET_ROOT / split
     splitDir.mkdir(parents=True, exist_ok=True)
@@ -122,7 +118,7 @@ def chooseRun(split):
     while True:
         choice = input("Use a new run or a current run? [new/current]: ").strip().lower()
         if choice == "new":
-            runName = sanitiseName(input("Enter a name for the new run: "))
+            runName = input("Enter a name for the new run: ")
             if not runName:
                 print("Run name cannot be empty.")
                 continue
@@ -147,7 +143,7 @@ def chooseRun(split):
                 if 0 <= index < len(runs):
                     return runs[index].name, runs[index]
             else:
-                runDir = splitDir / sanitiseName(selection)
+                runDir = splitDir / selection
                 if runDir.is_dir():
                     return runDir.name, runDir
             print("Could not find that run.")
@@ -155,7 +151,7 @@ def chooseRun(split):
 
         print("Please type 'new' or 'current'.")
 
-
+# Open Camera With Correct Settings
 def openCamera(cameraIndex):
     if sys.platform.startswith("win"):
         capture = cv2.VideoCapture(cameraIndex, cv2.CAP_DSHOW)
@@ -172,17 +168,9 @@ def openCamera(cameraIndex):
     capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return capture
 
-
-def recordVideo(
-    cameraIndex,
-    videoPath,
-    frameTimesPath,
-    stopEvent,
-    cameraReadyEvent,
-    startConfiguredEvent,
-    videoInfo,
-):
-    """Warm the camera first, then save only frames completed at/after common T0."""
+# TODO - COMMENTED UP TILL HERE - NEED TO LOOK THROUGH
+def recordVideo(cameraIndex, videoPath, frameTimesPath, stopEvent, cameraReadyEvent, startConfiguredEvent, videoInfo):
+    # Open Camera
     capture = openCamera(cameraIndex)
     backend = capture.getBackendName() if capture.isOpened() else "unknown"
     videoInfo["camera_index"] = cameraIndex
@@ -384,7 +372,7 @@ def main():
     while input("Type 'start' to prepare a recording: ").strip().lower() != "start":
         pass
 
-    split = promptForSplit()
+    split = promptDataType()
     runName, runDir = chooseRun(split)
 
     recordingName = time.strftime("recording_%Y%m%d_%H%M%S")

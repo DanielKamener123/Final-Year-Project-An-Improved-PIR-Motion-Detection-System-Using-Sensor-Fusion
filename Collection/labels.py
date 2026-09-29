@@ -1,13 +1,3 @@
-"""
-Converts a Label Studio TimelineLabels JSON export into the labels.csv
-format used by main.py. Only intervals labelled as human-present are
-written; all video frames outside those intervals are treated as
-no-human by the offline hub.
-
-Usage:
-    python -m Collection.labelstudio_labels --export export.json --recording Datasets/training/run_01/recording_...
-"""
-
 import argparse
 import csv
 import json
@@ -16,42 +6,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-POSITIVE_LABELS = {"human", "human present", "person", "person present", "1"}
+#POSITIVE_LABELS = {"human", "human present", "person", "person present", "1"}
 
 # The Converted Video That Was Labelled In Label Studio
 LABELSTUDIO_VIDEO = "video_labelstudio.mp4"
 
-
-# Checks The Labelled Video Has Exactly One Frame Per Row Of video_frames.csv
-# (If ffmpeg Duplicated Or Dropped Frames, Label Frame Numbers Would Point To The Wrong Timestamps)
-def checkFrameCount(videoPath, frameTimes):
-    if not videoPath.exists():
-        print(f"Warning: {videoPath.name} not found - frame count could not be checked")
-        return
-    try:
-        import cv2
-    except ImportError:
-        print("Warning: OpenCV not installed - frame count could not be checked")
-        return
-
-    capture = cv2.VideoCapture(str(videoPath))
-    frameCount = 0
-    while capture.grab():
-        frameCount += 1
-    capture.release()
-
-    if frameCount != len(frameTimes):
-        raise ValueError(
-            f"{videoPath.name} has {frameCount} frames but video_frames.csv has {len(frameTimes)} rows. "
-            "Re-convert the video with the ffmpeg command in the ReadMe (-r 30) so frames stay one-to-one."
-        )
-    print(f"Frame count check passed: {frameCount} frames")
-
-
-def normaliseLabel(value):
-    return str(value).strip().lower().replace("_", " ")
-
-
+# Get All Labels Needed From The Label Studio Export
 def labelsFromValue(value):
     labels = []
     for key in ("timelinelabels", "videotimelinelabels", "labels", "choices"):
@@ -83,7 +43,7 @@ def extractFrameRanges(exportData, taskId=None):
             for result in annotation.get("result", []):
                 value = result.get("value", {})
                 labels = labelsFromValue(value)
-                isHuman = any(normaliseLabel(label) in POSITIVE_LABELS for label in labels)
+                isHuman = "human" in labels
                 if not isHuman:
                     continue
 
@@ -165,8 +125,6 @@ def main():
     requestedBase = None if args.frame_base == "auto" else int(args.frame_base)
     frameBase = chooseFrameBase(frameRanges, requestedBase)
 
-    # Make Sure Label Frame Numbers Line Up With The Recorded Frame Timestamps
-    checkFrameCount(recordingDir / LABELSTUDIO_VIDEO, frameTimes)
     lastFrame = max((end for _, end, _ in frameRanges), default=frameBase)
     if lastFrame - frameBase > len(frameTimes) - 1:
         raise ValueError(
