@@ -217,7 +217,7 @@ def main():
 
     try:
         while True:
-            conn = server.accept()
+            conn, _ = server.accept()
             sendLock = threading.Lock()
             print(f"PC connected")
 
