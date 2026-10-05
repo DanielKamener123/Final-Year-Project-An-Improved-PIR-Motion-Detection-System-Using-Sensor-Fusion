@@ -79,7 +79,7 @@ def pirStreamLoop(conn, processor, stopEvent, sendLock):
     while not stopEvent.is_set():
         try:
             # Get Timestamp and Data From PIR Queue
-            rockTimestamp, voltage = processor.outputQueue.get(timeout=0.5)
+            rockTimestamp, voltage, relativeVoltage = processor.outputQueue.get(timeout=0.5)
         except queue.Empty:
             continue
 
