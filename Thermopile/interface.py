@@ -3,12 +3,27 @@ import adafruit_extended_bus
 
 # Config
 I2C_BUS = 7
-REFRESH_RATE = adafruit_mlx90640.RefreshRate.REFRESH_4_HZ
+I2C_FREQUENCY = 400_000
+REFRESH_RATE_HZ = 4.0
 
-i2c = adafruit_extended_bus.ExtendedI2C(I2C_BUS)
+REFRESH_RATES = {
+    0.5: adafruit_mlx90640.RefreshRate.REFRESH_0_5_HZ,
+    1.0: adafruit_mlx90640.RefreshRate.REFRESH_1_HZ,
+    2.0: adafruit_mlx90640.RefreshRate.REFRESH_2_HZ,
+    4.0: adafruit_mlx90640.RefreshRate.REFRESH_4_HZ,
+    8.0: adafruit_mlx90640.RefreshRate.REFRESH_8_HZ,
+    16.0: adafruit_mlx90640.RefreshRate.REFRESH_16_HZ,
+    32.0: adafruit_mlx90640.RefreshRate.REFRESH_32_HZ,
+    64.0: adafruit_mlx90640.RefreshRate.REFRESH_64_HZ,
+}
+
+if REFRESH_RATE_HZ not in REFRESH_RATES:
+    raise ValueError(f"Unsupported MLX90640 refresh rate: {REFRESH_RATE_HZ} Hz")
+
+i2c = adafruit_extended_bus.ExtendedI2C(I2C_BUS, frequency=I2C_FREQUENCY)
 
 mlx = adafruit_mlx90640.MLX90640(i2c)
-mlx.refresh_rate = REFRESH_RATE
+mlx.refresh_rate = REFRESH_RATES[REFRESH_RATE_HZ]
 
 frame_buffer = [0.0] * 768  # 32 x 24
 

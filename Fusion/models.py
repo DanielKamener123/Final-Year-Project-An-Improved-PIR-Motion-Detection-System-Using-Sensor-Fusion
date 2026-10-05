@@ -10,14 +10,19 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.ensemble import (
     RandomForestClassifier,
-    GradientBoostingClassifier
+    GradientBoostingClassifier,
 )
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neural_network import MLPClassifier
 
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    f1_score,
+    confusion_matrix,
+)
 
 
 # Config
@@ -28,136 +33,121 @@ LABEL_COLUMN = "human"
 # Preprocessing
 scaled_preprocessing = [
     SimpleImputer(strategy="median"),
-    StandardScaler()
+    StandardScaler(),
 ]
 
 tree_preprocessing = [
-    SimpleImputer(strategy="median")
+    SimpleImputer(strategy="median"),
 ]
 
 
-# Define algorithms
-# A fresh set is built for each detection system so that the fused and
-# PIR-only systems are trained independently using the same algorithms.
+# A fresh model set is created every time this function is called.
+# This keeps the feature-fusion and PIR-only systems independent.
 def buildModels():
     return {
-
         "Logistic Regression": make_pipeline(
             *scaled_preprocessing,
-            LogisticRegression(
-                max_iter=1000,
-                random_state=RANDOM_STATE
-            )
+            LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
         ),
-
         "Linear SVM": make_pipeline(
             *scaled_preprocessing,
-            SVC(
-                kernel="linear",
-                random_state=RANDOM_STATE
-            )
+            SVC(kernel="linear", random_state=RANDOM_STATE),
         ),
-
         "RBF SVM": make_pipeline(
             *scaled_preprocessing,
-            SVC(
-                kernel="rbf",
-                random_state=RANDOM_STATE
-            )
+            SVC(kernel="rbf", random_state=RANDOM_STATE),
         ),
-
         "Random Forest": make_pipeline(
             *tree_preprocessing,
             RandomForestClassifier(
                 n_estimators=100,
                 random_state=RANDOM_STATE,
-                n_jobs=-1
-            )
+                n_jobs=-1,
+            ),
         ),
-
         "k-Nearest Neighbours": make_pipeline(
             *scaled_preprocessing,
-            KNeighborsClassifier(
-                n_neighbors=5
-            )
+            KNeighborsClassifier(n_neighbors=5),
         ),
-
         "Decision Tree": make_pipeline(
             *tree_preprocessing,
-            DecisionTreeClassifier(
-                random_state=RANDOM_STATE
-            )
+            DecisionTreeClassifier(random_state=RANDOM_STATE),
         ),
-
         "Gradient Boosting": make_pipeline(
             *tree_preprocessing,
-            GradientBoostingClassifier(
-                random_state=RANDOM_STATE
-            )
+            GradientBoostingClassifier(random_state=RANDOM_STATE),
         ),
-
         "Gaussian Naive Bayes": make_pipeline(
             *scaled_preprocessing,
-            GaussianNB()
+            GaussianNB(),
         ),
-
         "Neural Network (MLP)": make_pipeline(
             *scaled_preprocessing,
             MLPClassifier(
                 hidden_layer_sizes=(32, 16),
                 max_iter=1000,
-                random_state=RANDOM_STATE
-            )
+                random_state=RANDOM_STATE,
+            ),
         ),
-
         "PCA + RBF SVM": make_pipeline(
             *scaled_preprocessing,
-            PCA(
-                n_components=0.95
-            ),
-            SVC(
-                kernel="rbf",
-                random_state=RANDOM_STATE
-            )
-        )
+            PCA(n_components=0.95),
+            SVC(kernel="rbf", random_state=RANDOM_STATE),
+        ),
     }
 
 
-def detectionMetrics(y_true, predictions):
-    """Return probability of detection and false alarm probability as percentages."""
+def calculateMetrics(y_true, predictions):
+    """Return all project performance metrics as percentages."""
     tn, fp, fn, tp = confusion_matrix(
         y_true,
         predictions,
-        labels=[0, 1]
+        labels=[0, 1],
     ).ravel()
 
-    detected_total = tp + fn
-    non_human_total = fp + tn
+    positive_total = tp + fn
+    negative_total = fp + tn
 
     probability_detection = (
-        100.0 * tp / detected_total
-        if detected_total > 0
+        100.0 * tp / positive_total
+        if positive_total > 0
         else np.nan
     )
 
     false_alarm_probability = (
-        100.0 * fp / non_human_total
-        if non_human_total > 0
+        100.0 * fp / negative_total
+        if negative_total > 0
         else np.nan
     )
 
-    return probability_detection, false_alarm_probability
+    accuracy = 100.0 * accuracy_score(y_true, predictions)
+    precision = 100.0 * precision_score(
+        y_true,
+        predictions,
+        zero_division=0,
+    )
+    f1 = 100.0 * f1_score(
+        y_true,
+        predictions,
+        zero_division=0,
+    )
+
+    return {
+        "Probability of Detection (%)": probability_detection,
+        "False Alarm Probability (%)": false_alarm_probability,
+        "Accuracy (%)": accuracy,
+        "Precision (%)": precision,
+        "F1 Score (%)": f1,
+    }
 
 
 def percentageImprovement(new_value, baseline_value, reduction=False):
     """
-    Calculate the direct improvement between two percentage results.
+    Direct difference between two percentage results.
 
-    The project output displays all results using the % symbol:
-        Detection improvement = fused Pd - PIR-only Pd
-        False-alarm improvement = PIR-only Pfa - fused Pfa
-
-    A positive value therefore always means the fused system improved.
+    Positive values always mean the fused system improved:
+      Detection improvement = fused Pd - PIR-only Pd
+      False-alarm improvement = PIR-only Pfa - fused Pfa
     """
     if pd.isna(new_value) or pd.isna(baseline_value):
         return np.nan
@@ -169,8 +159,14 @@ def percentageImprovement(new_value, baseline_value, reduction=False):
 
 
 def prepareFeatures(train_data, test_data, featureColumns):
-    missingTrain = [column for column in featureColumns if column not in train_data.columns]
-    missingTest = [column for column in featureColumns if column not in test_data.columns]
+    missingTrain = [
+        column for column in featureColumns
+        if column not in train_data.columns
+    ]
+    missingTest = [
+        column for column in featureColumns
+        if column not in test_data.columns
+    ]
 
     if missingTrain or missingTest:
         raise ValueError(
@@ -191,7 +187,11 @@ def prepareFeatures(train_data, test_data, featureColumns):
 
 def runDetectionSystem(train_data, test_data, featureColumns, systemName):
     """Train and evaluate every ML algorithm for one sensor configuration."""
-    X_train, X_test = prepareFeatures(train_data, test_data, featureColumns)
+    X_train, X_test = prepareFeatures(
+        train_data,
+        test_data,
+        featureColumns,
+    )
     y_train = train_data[LABEL_COLUMN]
     y_test = test_data[LABEL_COLUMN]
 
@@ -207,24 +207,29 @@ def runDetectionSystem(train_data, test_data, featureColumns, systemName):
             model.fit(X_train, y_train)
             predictions = model.predict(X_test)
 
-            probability_detection, false_alarm_probability = detectionMetrics(
-                y_test,
-                predictions
+            metrics = calculateMetrics(y_test, predictions)
+            results[name] = metrics
+
+            print(
+                f"Probability of Detection : "
+                f"{metrics['Probability of Detection (%)']:.2f}%"
             )
-
-            results[name] = {
-                "Probability of Detection (%)": probability_detection,
-                "False Alarm Probability (%)": false_alarm_probability,
-            }
-
-            print(f"Probability of Detection : {probability_detection:.2f}%")
-            print(f"False Alarm Probability : {false_alarm_probability:.2f}%")
+            print(
+                f"False Alarm Probability : "
+                f"{metrics['False Alarm Probability (%)']:.2f}%"
+            )
+            print(f"Accuracy                : {metrics['Accuracy (%)']:.2f}%")
+            print(f"Precision               : {metrics['Precision (%)']:.2f}%")
+            print(f"F1 Score                : {metrics['F1 Score (%)']:.2f}%")
 
         except Exception as error:
             print(f"Model failed: {error}")
             results[name] = {
                 "Probability of Detection (%)": np.nan,
                 "False Alarm Probability (%)": np.nan,
+                "Accuracy (%)": np.nan,
+                "Precision (%)": np.nan,
+                "F1 Score (%)": np.nan,
             }
 
     return results
@@ -232,13 +237,12 @@ def runDetectionSystem(train_data, test_data, featureColumns, systemName):
 
 def runModels(train_data, test_data, outputPath="model_comparison_results.csv"):
     """
-    Compare the feature-fusion system with a PIR-only system.
+    Compare feature fusion against PIR-only detection.
 
-    Both systems use exactly the same training rows, testing rows, labels,
-    history-window configuration and ML algorithms. The only difference is
-    the feature set supplied to the classifier.
+    Both systems use the same rows, labels and ML algorithms. The only
+    difference is that the fused classifier receives PIR + thermopile
+    features, while the PIR-only classifier receives only PIR features.
     """
-    # Check labels once because both systems use the same labels.
     y_train = train_data[LABEL_COLUMN]
     y_test = test_data[LABEL_COLUMN]
 
@@ -255,7 +259,8 @@ def runModels(train_data, test_data, outputPath="model_comparison_results.csv"):
 
     thermalFeatures = [
         column for column in train_data.columns
-        if column.startswith("thermal_") and column != "thermal_track_id"
+        if column.startswith("thermal_")
+        and column != "thermal_track_id"
     ]
 
     fusedFeatures = pirFeatures + thermalFeatures
@@ -268,13 +273,16 @@ def runModels(train_data, test_data, outputPath="model_comparison_results.csv"):
 
     print("\n" + "#" * 70)
     print("FEATURE-FUSION SYSTEM")
-    print(f"Features used: {len(fusedFeatures)} ({len(pirFeatures)} PIR + {len(thermalFeatures)} thermopile)")
+    print(
+        f"Features used: {len(fusedFeatures)} "
+        f"({len(pirFeatures)} PIR + {len(thermalFeatures)} thermopile)"
+    )
     print("#" * 70)
     fusedResults = runDetectionSystem(
         train_data,
         test_data,
         fusedFeatures,
-        "Feature Fusion"
+        "Feature Fusion",
     )
 
     print("\n" + "#" * 70)
@@ -285,7 +293,7 @@ def runModels(train_data, test_data, outputPath="model_comparison_results.csv"):
         train_data,
         test_data,
         pirFeatures,
-        "PIR Only"
+        "PIR Only",
     )
 
     comparisonRows = []
@@ -308,20 +316,23 @@ def runModels(train_data, test_data, outputPath="model_comparison_results.csv"):
             "Probability of Detection Improvement (%)": percentageImprovement(
                 fusedPd,
                 pirPd,
-                reduction=False
+                reduction=False,
             ),
             "False Alarm Probability Improvement (%)": percentageImprovement(
                 fusedFa,
                 pirFa,
-                reduction=True
+                reduction=True,
             ),
+                        "Fused Accuracy (%)": fused["Accuracy (%)"],
+            "Fused Precision (%)": fused["Precision (%)"],
+            "Fused F1 Score (%)": fused["F1 Score (%)"],
         })
 
     results_df = pd.DataFrame(comparisonRows)
 
-    print("\n" + "=" * 110)
+    print("\n" + "=" * 140)
     print("FUSION VS PIR-ONLY COMPARISON")
-    print("=" * 110)
+    print("=" * 140)
 
     display_df = results_df.copy()
     percentageColumns = [
@@ -335,7 +346,7 @@ def runModels(train_data, test_data, outputPath="model_comparison_results.csv"):
 
     print(display_df.to_string(index=False))
 
-    # Save numeric percentage values so the CSV remains easy to analyse.
+    # Keep numeric percentage values in the CSV for later analysis.
     results_df.to_csv(outputPath, index=False, float_format="%.4f")
 
     return results_df

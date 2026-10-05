@@ -6,6 +6,8 @@ import time
 
 from PIR.interface import PIRAcquisition, sampleRateHz
 from PIR.processing import PIRProcessor
+import Thermopile.processing as thermopile
+from Thermopile.interface import REFRESH_RATE_HZ
 from Collection.protocol import (
     CMD_START_AT,
     CMD_STOP,
@@ -33,14 +35,7 @@ from Collection.protocol import (
     TYPE_THERMAL,
 )
 
-THERMAL_RATE_HZ = 4.0
-THERMAL_FRAME_SHAPE = (24, 32)
-THERMAL_FRAME_SIZE = 24 * 32
-
-# Set True when the real MLX90640 is connected and working.
-# False keeps the collection path testable by sending dummy 32x24 frames.
-USE_THERMOPILE = False
-thermopile = None
+THERMAL_RATE_HZ = REFRESH_RATE_HZ
 
 # Converts Dictionary to JSON and Sends
 def sendJson(conn, payload, sendLock):
@@ -67,23 +62,13 @@ def calibrationData(processor, status):
         KEY_THERMAL_RATE: THERMAL_RATE_HZ,
     }
 
-    #TODO: REMOVE THIS WHEN THERMOPILE IS WORKING
-    if USE_THERMOPILE:
-        payload.update(
-            {
-                KEY_THERMAL_FRAME_SHAPE: list(thermopile.FRAME_SHAPE),
-                KEY_THERMAL_BACKGROUND: thermopile.getBackground().reshape(-1).astype(float).tolist(),
-                KEY_THERMAL_SIGMA: thermopile.getSigma().reshape(-1).astype(float).tolist(),
-            }
-        )
-    else:
-        payload.update(
-            {
-                KEY_THERMAL_FRAME_SHAPE: list(THERMAL_FRAME_SHAPE),
-                KEY_THERMAL_BACKGROUND: [23.0] * THERMAL_FRAME_SIZE,
-                KEY_THERMAL_SIGMA: [0.0] * THERMAL_FRAME_SIZE,
-            }
-        )
+    payload.update(
+        {
+            KEY_THERMAL_FRAME_SHAPE: list(thermopile.FRAME_SHAPE),
+            KEY_THERMAL_BACKGROUND: thermopile.getBackground().reshape(-1).astype(float).tolist(),
+            KEY_THERMAL_SIGMA: thermopile.getSigma().reshape(-1).astype(float).tolist(),
+        }
+    )
     return payload
 
 # Send PIR Data
@@ -117,40 +102,7 @@ def pirStreamLoop(conn, processor, stopEvent, sendLock):
             break
         seqIndex += 1
 
-# TODO: REMOVE THIS WHEN THERMOPILE IS WORKING
-def dummyThermopileStreamLoop(conn, stopEvent, sendLock):
-    seq = 0
-    period = 1.0 / THERMAL_RATE_HZ
-
-    while not stopEvent.is_set():
-        loopStart = time.monotonic()
-
-        rawFrame = [23.0] * THERMAL_FRAME_SIZE
-        # Timestamp after the frame has been obtained.
-        rockTimestamp = time.time()
-
-        try:
-            sendJson(
-                conn,
-                {
-                    KEY_TYPE: TYPE_THERMAL,
-                    KEY_SEQ: seq,
-                    KEY_ROCK_TIMESTAMP: rockTimestamp,
-                    KEY_FRAME: rawFrame,
-                },
-                sendLock,
-            )
-        except OSError:
-            stopEvent.set()
-            break
-
-        seq += 1
-        remaining = period - (time.monotonic() - loopStart)
-        if remaining > 0:
-            stopEvent.wait(remaining)
-
-# TODO: RENAME THIS WHEN THERMOPILE IS WORKING
-def realThermopileStreamLoop(conn, stopEvent, sendLock):
+def thermopileStreamLoop(conn, stopEvent, sendLock):
     seqIndex = 0
 
     # Keep Sending Frames Until Stop Condition Is Set
@@ -179,6 +131,7 @@ def realThermopileStreamLoop(conn, stopEvent, sendLock):
             stopEvent.set()
             break
         seqIndex += 1
+
 
 # Wait For Start At Or Stop Command From PC
 def waitForCommand(conn, expected, sendLock):
@@ -239,18 +192,9 @@ def waitUntilRockTime(targetTime):
             return
         time.sleep(min(remaining, 0.02))
 
-# TODO: FIX This Function To Use The Thermopile Module When It Is Working
 def main():
-    global thermopile
-
-    if USE_THERMOPILE:
-        print("Warming up thermopile")
-        import Thermopile.processing as thermopileModule
-
-        thermopile = thermopileModule
-        thermopile.warmUp()
-    else:
-        print("Thermopile dummy mode enabled")
+    print("Warming up thermopile")
+    thermopile.warmUp()
 
 
     print("Starting PIR")
@@ -298,9 +242,8 @@ def main():
                     daemon=True,
                 )
 
-                # TODO: REMOVE THIS WHEN THERMOPILE IS WORKING
                 thermalThread = threading.Thread(
-                    target=realThermopileStreamLoop if USE_THERMOPILE else dummyThermopileStreamLoop,
+                    target=thermopileStreamLoop,
                     args=(conn, stopEvent, sendLock),
                     daemon=True,
                 )
