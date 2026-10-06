@@ -7,55 +7,65 @@ import numpy as np
 # Warm Up Time
 warmupTime = 10
 
-# How Quickly System Adapts To Background Changes While System Is Idle 
-alpha = 0.01
-
 threshold = 0.2
 rollingWindow = 1
 historyBuffer = 10
+rawHistoryBuffer = 20
 
 # Get The Context Features From The Last PIR Samples In History Buffer
 def getHistoryFeatureVector(samples):
     # Check For No Samples
     if not samples:
-        return np.zeros(4)
+        return np.zeros(7)
 
     # Gets Timestamps and Values from Samples In Seperate Arrays
     timestamps = np.asarray([ts for ts, _ in samples])
     values = np.asarray([value for _, value in samples])
 
+    # Calculate Peak To Peak (Feature 1)
+    positivePeak = float(np.max(values))
+    negativePeak = float(np.min(values))
+    peakToPeak = float(positivePeak - negativePeak)
+
+    # Calculate RMS
+    rms = float(np.sqrt(np.mean(values ** 2)))
+
     # Calculate Mean Signal Energy (Feature 4)
     meanSignalEnergy = float(np.mean(values ** 2))
 
-    # Check For Active Samples Otherwise Return Empty Feature Vector
-    active = np.abs(values) >= float(threshold)
-    if not np.any(active):
-        return np.array([0.0, 0.0, 0.0, meanSignalEnergy])
-
-    # Calculate Peak To Peak (Feature 1)
-    peakToPeak = float(np.max(values) - np.min(values))
-
     # Calculate Activity Duration (Feature 2)
-    timeActive = np.flatnonzero(active)
-    activityDuration = float(timestamps[timeActive[-1]] - timestamps[timeActive[0]])
+    active = np.abs(values) >= float(threshold)
+    if np.any(active):
+        timeActive = np.flatnonzero(active)
+        activityDuration = float(timestamps[timeActive[-1]] - timestamps[timeActive[0]])
+    else:
+        activityDuration = 0.0
 
     # Calculate Peak Separation (Feature 3)
     maxPeakIndex = int(np.argmax(values))
     minPeakIndex = int(np.argmin(values))
-    if values[maxPeakIndex] >= threshold and values[minPeakIndex] <= -threshold:
-        peak_separation = float(abs(timestamps[maxPeakIndex] - timestamps[minPeakIndex]))
-    else:
-        peak_separation = 0.0
+    peak_separation = float(abs(timestamps[maxPeakIndex] - timestamps[minPeakIndex]))
 
-    return np.array([peakToPeak, activityDuration, peak_separation, meanSignalEnergy])
+    return np.array([
+        positivePeak,
+        negativePeak,
+        peakToPeak,
+        rms,
+        meanSignalEnergy,
+        activityDuration,
+        peak_separation,
+    ])
 
 
 def getHistoryFeatureNames():
     return [
+        "positivePeak",
+        "negativePeak",
         "peakToPeak",
+        "rms",
+        "meanSignalEnergy",
         "activityDuration",
         "peakSeparation",
-        "meanSignalEnergy",
     ]
 
 # Get Current Features From Current Sample
@@ -65,9 +75,6 @@ def getCurrentFeatureVector(relativeVoltage):
 
     relativeVoltage = float(relativeVoltage)
     pir_active = int(abs(relativeVoltage) >= float(threshold))
-
-    if not pir_active:
-        return np.zeros(2, dtype=np.float64)
 
     return np.array(
         [pir_active, relativeVoltage],
@@ -104,6 +111,7 @@ class PIRProcessor:
         self.lastError = None
 
         self.history = deque()
+        self.rawHistory = deque()
         self.historyLock = threading.Lock()
         self.stateLock = threading.Lock()
 
@@ -112,11 +120,6 @@ class PIRProcessor:
 
         if self.sampleQueue is not None:
             self.workerThread = threading.Thread(target=self.run, daemon=True)
-
-    # Learns Background Temperature As Temperature Changes
-    def updateBackground(self, v):
-        with self.stateLock:
-            self.baselineVoltage = (1 - alpha) * self.baselineVoltage + alpha * v
 
     # Warm Up
     def warmup(self, ts, v):
@@ -132,6 +135,27 @@ class PIRProcessor:
         if ts - self.warmupStartTime >= warmupTime:
             self.initialised = True
 
+    def calibrate(self, windowTime=warmupTime):
+        with self.historyLock:
+            rawSamples = list(self.rawHistory)
+
+        if not rawSamples:
+            raise RuntimeError("No PIR samples are available for calibration")
+
+        endTime = rawSamples[-1][0]
+        startTime = endTime - float(windowTime)
+        calibrationValues = [value for ts, value in rawSamples if ts >= startTime]
+
+        if not calibrationValues:
+            raise RuntimeError("No PIR samples are available in the calibration window")
+
+        with self.stateLock:
+            self.baselineVoltage = float(np.median(calibrationValues))
+            self.initialised = True
+
+        with self.historyLock:
+            self.history.clear()
+
     def processSample(self, ts, v):
         # Validation - TODO: Can Remove
         ts, v = float(ts), float(v)
@@ -140,6 +164,12 @@ class PIRProcessor:
         if self.lastTime is not None and ts <= self.lastTime:
             raise ValueError("PIR timestamps must be strictly increasing")
         self.lastTime = ts
+
+        with self.historyLock:
+            self.rawHistory.append((ts, v))
+            rawCutoff = ts - rawHistoryBuffer
+            while self.rawHistory and self.rawHistory[0][0] < rawCutoff:
+                self.rawHistory.popleft()
 
         # Make Sure System Is Warmed Up
         if not self.initialised:
@@ -156,9 +186,6 @@ class PIRProcessor:
             cutoff = ts - self.maxHistoryTime
             while self.history and self.history[0][0] < cutoff:
                 self.history.popleft()
-
-        if abs(relative) < threshold:
-            self.updateBackground(v)
 
         return relative
 

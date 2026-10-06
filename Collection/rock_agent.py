@@ -222,6 +222,10 @@ def main():
             print(f"PC connected")
 
             with conn:
+                print("Calibrating sensors - Make Sure No One Is In Frame")
+                thermopile.calibrate()
+                processor.calibrate()
+                print("Calibration complete")
                 sendJson(conn, calibrationData(processor, STATUS_READY), sendLock)
 
                 startPayload = waitForCommand(conn, CMD_START_AT, sendLock)

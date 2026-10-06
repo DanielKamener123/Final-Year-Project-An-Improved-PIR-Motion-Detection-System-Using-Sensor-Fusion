@@ -16,7 +16,8 @@ gaussianKernel = np.array([
 filterMode = "reflect"
 
 # Threshold
-fixed_threshold = 8.0 # When not using adaptive thresholding
+fixed_threshold = 3.0 # When not using adaptive thresholding
+background_protection_threshold = 2.0
 use_adaptive_threshold = False
 adaptive_coeffs = None # [a, b, c] TODO: Replace with proper coefficients
 adaptive_min_threshold = 1.5  # lower bound
@@ -40,7 +41,7 @@ class BackgroundModel:
 
     # Calibrate Background
     def warm_start(self, calibration_frames):
-        self.bg[:] = calibration_frames.mean(axis=0)
+        self.bg[:] = np.median(calibration_frames, axis=0)
         measured_sigma = calibration_frames.std(axis=0)
         self.sigma = np.maximum(measured_sigma, SIGMA_MIN)
         self._initialised = True
@@ -237,6 +238,11 @@ class ThermopilePipeline:
     # Get Background Without Human
     def warm_start(self, calibration_frames):
         self.bg_model.warm_start(calibration_frames)
+        self._prev_mask = np.zeros(self.frame_shape, dtype=bool)
+        self._prev_blobs = []
+        self._tracks = {}
+        self._next_track_id = 1
+        self.primary_track_id = None
 
     def process_frame(self, frame):
         # Step 2: Z Score
@@ -249,11 +255,12 @@ class ThermopilePipeline:
         scene_temp = self.bg_model.scene_temperature()
         threshold = compute_threshold(scene_temp)
         mask = apply_threshold(smoothed_z, threshold)
+        protection_mask = apply_threshold(smoothed_z, background_protection_threshold)
 
         temperature_difference = np.abs(frame - self.bg_model.bg)
 
         # Steps 1: Update Background + Sigma
-        self.bg_model.update(frame, mask)
+        self.bg_model.update(frame, protection_mask)
 
         # Step 5: Blob extraction
         blobs = extract_blobs(mask)

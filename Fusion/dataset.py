@@ -17,21 +17,23 @@ from Thermopile.thermopile_pipeline import ThermopilePipeline
 THERMAL_CURRENT_FEATURE_NAMES = [
     "number_of_blobs",
     "total_foreground_pixels",
+    "max_z",
+    "top_10_mean_z",
+    "pixels_z_above_2",
+    "pixels_z_above_3",
+    "scene_temperature",
     "pixel_count",
+    "centroid_row",
+    "centroid_col",
+    "track_age_frames",
+    "centroid_speed_px_s",
     "mean_temperature_difference",
     "max_temperature_difference",
 ]
 
-# Historical Thermopile Features Are Calculated Over The Shared History Window
-THERMAL_HISTORY_FEATURE_NAMES = [
-    "path_length_px",
-    "net_displacement_px",
-    "presence_ratio",
-]
-
 
 def thermalFeatureNames():
-    return THERMAL_CURRENT_FEATURE_NAMES + THERMAL_HISTORY_FEATURE_NAMES
+    return THERMAL_CURRENT_FEATURE_NAMES
 
 
 # If No Blob Is Detected
@@ -76,13 +78,15 @@ def preprocessPIR(pirData, initialBaseline, windowSeconds):
     return timestamps, relative
 
 
-def flattenDetection(detection):
+def flattenDetection(detection, centroidSpeed):
     features = detection.features
     return {
         "track_id": int(features.track_id),
         "pixel_count": float(features.pixel_count),
         "centroid_row": float(features.centroid[0]),
         "centroid_col": float(features.centroid[1]),
+        "track_age_frames": float(features.track_age_frames),
+        "centroid_speed_px_s": float(centroidSpeed),
         "mean_temperature_difference": float(features.mean_temperature_difference),
         "max_temperature_difference": float(features.max_temperature_difference),
     }
@@ -106,97 +110,91 @@ def processThermopile(thermalData, metadata):
 
     timestamps = thermalData["time_s"].to_numpy(dtype=np.float64)
     frameRows = []
+    previousTrackPositions = {}
 
-    for _, row in thermalData.iterrows():
+    for frameIndex, (_, row) in enumerate(thermalData.iterrows()):
         frame = row[pixelColumns].to_numpy(dtype=np.float64).reshape(frameShape)
         detections = pipeline.process_frame(frame)
-        flattened = [flattenDetection(detection) for detection in detections]
+        timestamp = float(timestamps[frameIndex])
+        flattened = []
+        updatedTrackPositions = dict(previousTrackPositions)
+
+        for detection in detections:
+            trackId = int(detection.features.track_id)
+            centroidRow = float(detection.features.centroid[0])
+            centroidCol = float(detection.features.centroid[1])
+            centroidSpeed = 0.0
+
+            if trackId in previousTrackPositions:
+                previousTime, previousRow, previousCol = previousTrackPositions[trackId]
+                dt = timestamp - previousTime
+                if dt > 0:
+                    centroidSpeed = float(
+                        np.hypot(
+                            centroidRow - previousRow,
+                            centroidCol - previousCol,
+                        ) / dt
+                    )
+
+            flattened.append(flattenDetection(detection, centroidSpeed))
+            updatedTrackPositions[trackId] = (timestamp, centroidRow, centroidCol)
+
+        previousTrackPositions = updatedTrackPositions
+
+        smoothedZ = pipeline.last_smoothed_z
+        flatZ = smoothedZ.reshape(-1)
+        strongestCount = min(10, flatZ.size)
+        strongestValues = np.partition(flatZ, flatZ.size - strongestCount)[-strongestCount:]
+
         frameRows.append({
             "detections": flattened,
             "number_of_blobs": len(flattened),
             "total_foreground_pixels": float(sum(detection["pixel_count"] for detection in flattened)),
             "primary_track_id": pipeline.primary_track_id,
+            "max_z": float(np.max(flatZ)),
+            "top_10_mean_z": float(np.mean(strongestValues)),
+            "pixels_z_above_2": float(np.count_nonzero(smoothedZ > 2.0)),
+            "pixels_z_above_3": float(np.count_nonzero(smoothedZ > 3.0)),
+            "scene_temperature": float(pipeline.last_scene_temp),
         })
 
     return timestamps, frameRows
 
 
-def thermalFeaturesAtTime(thermalTimestamps, thermalRows, fusionTime, windowSeconds, thermalValid):
+def thermalFeaturesAtIndex(thermalRows, thermalIndex):
     features = emptyThermalFeatures()
-
-    thermalIndex = np.searchsorted(thermalTimestamps, fusionTime, side="right") - 1
-    if thermalIndex < 0:
-        return False, features
-
     currentFrame = thermalRows[thermalIndex]
     selectedTrackId = currentFrame["primary_track_id"]
 
-    currentPrimary = None
-    if thermalValid and selectedTrackId is not None:
-        matching = [
-            detection
-            for detection in currentFrame["detections"]
-            if int(detection["track_id"]) == int(selectedTrackId)
-        ]
-        if matching:
-            currentPrimary = matching[0]
+    features["number_of_blobs"] = float(currentFrame["number_of_blobs"])
+    features["total_foreground_pixels"] = float(currentFrame["total_foreground_pixels"])
+    features["max_z"] = float(currentFrame["max_z"])
+    features["top_10_mean_z"] = float(currentFrame["top_10_mean_z"])
+    features["pixels_z_above_2"] = float(currentFrame["pixels_z_above_2"])
+    features["pixels_z_above_3"] = float(currentFrame["pixels_z_above_3"])
+    features["scene_temperature"] = float(currentFrame["scene_temperature"])
 
-    # Current Frame Features
-    if thermalValid:
-        features["number_of_blobs"] = float(currentFrame["number_of_blobs"])
-        features["total_foreground_pixels"] = float(currentFrame["total_foreground_pixels"])
+    if selectedTrackId is None:
+        return False, features
 
-        if currentPrimary is not None:
-            features["pixel_count"] = float(currentPrimary["pixel_count"])
-            features["mean_temperature_difference"] = float(currentPrimary["mean_temperature_difference"])
-            features["max_temperature_difference"] = float(currentPrimary["max_temperature_difference"])
+    matching = [
+        detection
+        for detection in currentFrame["detections"]
+        if int(detection["track_id"]) == int(selectedTrackId)
+    ]
+    if not matching:
+        return False, features
 
-    # Use The Current Primary Track For History
-    historyStart = np.searchsorted(thermalTimestamps, fusionTime - windowSeconds, side="right")
-    historyEnd = thermalIndex + 1
-    historyIndices = list(range(historyStart, historyEnd))
+    currentPrimary = matching[0]
+    features["pixel_count"] = float(currentPrimary["pixel_count"])
+    features["centroid_row"] = float(currentPrimary["centroid_row"])
+    features["centroid_col"] = float(currentPrimary["centroid_col"])
+    features["track_age_frames"] = float(currentPrimary["track_age_frames"])
+    features["centroid_speed_px_s"] = float(currentPrimary["centroid_speed_px_s"])
+    features["mean_temperature_difference"] = float(currentPrimary["mean_temperature_difference"])
+    features["max_temperature_difference"] = float(currentPrimary["max_temperature_difference"])
 
-    if selectedTrackId is None or not historyIndices:
-        return currentPrimary is not None, features
-
-    trackHistory = []
-    detectedFrameCount = 0
-
-    for index in historyIndices:
-        matching = [
-            detection
-            for detection in thermalRows[index]["detections"]
-            if int(detection["track_id"]) == int(selectedTrackId)
-        ]
-        if not matching:
-            continue
-
-        detectedFrameCount += 1
-        trackHistory.append((float(thermalTimestamps[index]), matching[0]))
-
-    features["presence_ratio"] = float(detectedFrameCount / len(historyIndices))
-
-    if len(trackHistory) < 2:
-        return currentPrimary is not None, features
-
-    first = trackHistory[0][1]
-    last = trackHistory[-1][1]
-
-    rowDisplacement = float(last["centroid_row"] - first["centroid_row"])
-    colDisplacement = float(last["centroid_col"] - first["centroid_col"])
-    netDisplacement = float(np.hypot(rowDisplacement, colDisplacement))
-
-    pathLength = 0.0
-
-    for (_, previous), (_, current) in zip(trackHistory[:-1], trackHistory[1:]):
-        dr = float(current["centroid_row"] - previous["centroid_row"])
-        dc = float(current["centroid_col"] - previous["centroid_col"])
-        pathLength += float(np.hypot(dr, dc))
-
-    features["path_length_px"] = float(pathLength)
-    features["net_displacement_px"] = float(netDisplacement)
-
-    return currentPrimary is not None, features
+    return True, features
 
 
 def recordingFolders(datasetDir):
@@ -206,7 +204,7 @@ def recordingFolders(datasetDir):
     return sorted(path.parent for path in datasetDir.rglob("metadata.json"))
 
 
-def buildRecordingDataset(recordingDir, windowSeconds, stepSeconds, maxSensorAgePeriods=2.0):
+def buildRecordingDataset(recordingDir, windowSeconds, maxPirAgePeriods=2.0):
     recordingDir = Path(recordingDir)
     labels = loadLabels(recordingDir)
     if labels is None:
@@ -230,25 +228,28 @@ def buildRecordingDataset(recordingDir, windowSeconds, stepSeconds, maxSensorAge
     )
     thermalTimestamps, thermalRows = processThermopile(thermalData, metadata)
 
-    # No Fusion Decision Is Made Until Both History Buffers Are Full
-    startTime = max(pirTimestamps[0], thermalTimestamps[0]) + windowSeconds
-    endTime = min(pirTimestamps[-1], thermalTimestamps[-1])
+    # No Fusion Decision Is Made Until The PIR History Buffer Is Full
+    startTime = pirTimestamps[0] + windowSeconds
+    endTime = pirTimestamps[-1]
     if endTime <= startTime:
         print(f"Skipping {recordingDir}: recording is shorter than the selected window")
         return pd.DataFrame()
 
     pirRate = float(metadata.get("pir_sample_rate_hz", 0.0))
-    thermalRate = float(metadata.get("thermal_rate_hz", 0.0))
-    maxPirAge = maxSensorAgePeriods / pirRate if pirRate > 0 else np.inf
-    maxThermalAge = maxSensorAgePeriods / thermalRate if thermalRate > 0 else np.inf
+    maxPirAge = maxPirAgePeriods / pirRate if pirRate > 0 else np.inf
 
     pirHistoryNames = getHistoryFeatureNames()
     pirCurrentNames = getCurrentFeatureNames()
     thermalNames = thermalFeatureNames()
     rows = []
 
-    fusionTimes = np.arange(startTime, endTime + 1e-9, stepSeconds)
-    for fusionTime in fusionTimes:
+    validThermalIndices = np.flatnonzero(
+        (thermalTimestamps >= startTime)
+        & (thermalTimestamps <= endTime)
+    )
+
+    for thermalIndex in validThermalIndices:
+        fusionTime = float(thermalTimestamps[thermalIndex])
         pirStart = np.searchsorted(pirTimestamps, fusionTime - windowSeconds, side="right")
         pirEnd = np.searchsorted(pirTimestamps, fusionTime, side="right")
         if pirEnd <= pirStart:
@@ -271,17 +272,9 @@ def buildRecordingDataset(recordingDir, windowSeconds, stepSeconds, maxSensorAge
             else np.zeros(len(pirCurrentNames), dtype=np.float64)
         )
 
-        thermalIndex = np.searchsorted(thermalTimestamps, fusionTime, side="right") - 1
-        if thermalIndex < 0:
-            continue
-        thermalAge = float(fusionTime - thermalTimestamps[thermalIndex])
-        thermalValid = int(thermalAge <= maxThermalAge)
-        thermalDetected, thermalFeatures = thermalFeaturesAtTime(
-            thermalTimestamps,
+        thermalDetected, thermalFeatures = thermalFeaturesAtIndex(
             thermalRows,
-            fusionTime,
-            windowSeconds,
-            bool(thermalValid),
+            int(thermalIndex),
         )
 
         relativeVideoTime = float(fusionTime)
@@ -292,7 +285,6 @@ def buildRecordingDataset(recordingDir, windowSeconds, stepSeconds, maxSensorAge
             "video_time_s": relativeVideoTime,
             "window_seconds": float(windowSeconds),
             "pir_valid": pirValid,
-            "thermal_valid": thermalValid,
             "thermal_detected": int(thermalDetected),
             "human": labelAtTime(labels, relativeVideoTime),
         }
@@ -304,7 +296,7 @@ def buildRecordingDataset(recordingDir, windowSeconds, stepSeconds, maxSensorAge
     return pd.DataFrame(rows)
 
 
-def buildDataset(datasetDir, windowSeconds, stepSeconds, maxSensorAgePeriods=2.0):
+def buildDataset(datasetDir, windowSeconds, maxPirAgePeriods=2.0):
     allRows = []
     folders = recordingFolders(datasetDir)
     if not folders:
@@ -315,8 +307,7 @@ def buildDataset(datasetDir, windowSeconds, stepSeconds, maxSensorAgePeriods=2.0
         data = buildRecordingDataset(
             recordingDir,
             windowSeconds,
-            stepSeconds,
-            maxSensorAgePeriods=maxSensorAgePeriods,
+            maxPirAgePeriods=maxPirAgePeriods,
         )
         if not data.empty:
             allRows.append(data)

@@ -1,6 +1,7 @@
 import numpy as np
 
 from Thermopile.interface import getFrame as getRawFrame
+from Thermopile.interface import REFRESH_RATE_HZ
 from Thermopile.thermopile_pipeline import ThermopilePipeline
 
 WIDTH = 32
@@ -8,6 +9,7 @@ HEIGHT = 24
 FRAME_SHAPE = (HEIGHT, WIDTH)
 
 N_WARMUP_FRAMES = 20
+CALIBRATION_SECONDS = 10
 
 Pipeline = ThermopilePipeline(frame_shape=FRAME_SHAPE)
 
@@ -25,6 +27,13 @@ def warmUp():
         calibrationFrames[i] = convertFlatArray(getRawFrame())
     Pipeline.warm_start(calibrationFrames)
     print("Warm Up Complete")
+
+def calibrate(seconds=CALIBRATION_SECONDS):
+    calibrationFrameCount = max(1, int(round(float(seconds) * REFRESH_RATE_HZ)))
+    calibrationFrames = np.empty((calibrationFrameCount, *FRAME_SHAPE), dtype=np.float64)
+    for i in range(calibrationFrameCount):
+        calibrationFrames[i] = convertFlatArray(getRawFrame())
+    Pipeline.warm_start(calibrationFrames)
 
 # Process Frame
 def getFrame():

@@ -255,6 +255,7 @@ def runModels(train_data, test_data, outputPath="model_comparison_results.csv"):
     pirFeatures = [
         column for column in train_data.columns
         if column.startswith("pir_")
+        and column != "pir_valid"
     ]
 
     thermalFeatures = [

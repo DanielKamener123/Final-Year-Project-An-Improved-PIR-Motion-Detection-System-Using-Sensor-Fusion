@@ -104,12 +104,14 @@ def measureClockOffset(sock, state, pings=CLOCK_SYNC_PINGS):
 # Get Data Type
 def promptDataType():
     while True:
-        answer = input("Is this training or testing data? [training/testing]: ").strip().lower()
+        answer = input("Is this training, validation or testing data? [training/validation/testing]: ").strip().lower()
         if answer in ("train", "training"):
             return "training"
+        if answer in ("val", "validation"):
+            return "validation"
         if answer in ("test", "testing"):
             return "testing"
-        print("Please type 'training' or 'testing'.")
+        print("Please type 'training', 'validation' or 'testing'.")
 
 def chooseRun(split):
     splitDir = DATASET_ROOT / split
@@ -387,6 +389,7 @@ def main():
 
     print(f"Connecting to ROCK 4C+ at {args.host}:{args.port} ...")
     sock = connectWithRetry(args.host, args.port)
+    print("Keep the monitored area empty while the sensors calibrate...")
     readyPayload = waitForReady(sock)
     print("ROCK connected and sensors are ready.")
 
