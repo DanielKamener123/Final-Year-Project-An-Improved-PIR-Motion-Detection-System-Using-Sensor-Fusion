@@ -1,5 +1,9 @@
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+
+from Fusion.event_analysis import analyze_events
 
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -15,7 +19,6 @@ from sklearn.ensemble import (
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.naive_bayes import GaussianNB
-from sklearn.neural_network import MLPClassifier
 
 from sklearn.metrics import (
     accuracy_score,
@@ -51,11 +54,11 @@ def buildModels():
         ),
         "Linear SVM": make_pipeline(
             *scaled_preprocessing,
-            SVC(kernel="linear", random_state=RANDOM_STATE),
+            SVC(kernel="linear", probability=True, random_state=RANDOM_STATE),
         ),
         "RBF SVM": make_pipeline(
             *scaled_preprocessing,
-            SVC(kernel="rbf", random_state=RANDOM_STATE),
+            SVC(kernel="rbf", probability=True, random_state=RANDOM_STATE),
         ),
         "Random Forest": make_pipeline(
             *tree_preprocessing,
@@ -81,18 +84,10 @@ def buildModels():
             *scaled_preprocessing,
             GaussianNB(),
         ),
-        "Neural Network (MLP)": make_pipeline(
-            *scaled_preprocessing,
-            MLPClassifier(
-                hidden_layer_sizes=(32, 16),
-                max_iter=1000,
-                random_state=RANDOM_STATE,
-            ),
-        ),
         "PCA + RBF SVM": make_pipeline(
             *scaled_preprocessing,
             PCA(n_components=0.95),
-            SVC(kernel="rbf", random_state=RANDOM_STATE),
+            SVC(kernel="rbf", probability=True, random_state=RANDOM_STATE),
         ),
     }
 
@@ -142,20 +137,19 @@ def calculateMetrics(y_true, predictions):
 
 
 def percentageImprovement(new_value, baseline_value, reduction=False):
-    """
-    Direct difference between two percentage results.
+    """Relative percentage improvement against the PIR-only baseline.
 
-    Positive values always mean the fused system improved:
-      Detection improvement = fused Pd - PIR-only Pd
-      False-alarm improvement = PIR-only Pfa - fused Pfa
+    For increases: 100 * (fused - PIR) / PIR.
+    For reductions: 100 * (PIR - fused) / PIR.
+    Undefined when the baseline is 0 or either value is missing.
     """
-    if pd.isna(new_value) or pd.isna(baseline_value):
+    if pd.isna(new_value) or pd.isna(baseline_value) or baseline_value == 0:
         return np.nan
 
     if reduction:
-        return baseline_value - new_value
+        return 100.0 * (baseline_value - new_value) / baseline_value
 
-    return new_value - baseline_value
+    return 100.0 * (new_value - baseline_value) / baseline_value
 
 
 def prepareFeatures(train_data, test_data, featureColumns):
@@ -185,6 +179,181 @@ def prepareFeatures(train_data, test_data, featureColumns):
     return X_train, X_test
 
 
+
+def calculateEventMetrics(eval_data, predictions, maxDelaySeconds=10.0, consecutiveFrames=1):
+    """Measure labelled 0->1 intrusion events for EACH recording separately.
+
+    An event beginning at the first available frame is excluded: its true onset
+    cannot be determined. Detection must begin on/after the labelled entry and
+    have consecutiveFrames positive samples within maxDelaySeconds and the event.
+    """
+    required = {"recording", "fusion_time_s", LABEL_COLUMN}
+    missing = required - set(eval_data.columns)
+    if missing:
+        raise ValueError(f"Cannot evaluate event Pd; missing columns: {sorted(missing)}")
+    if consecutiveFrames < 1 or maxDelaySeconds <= 0:
+        raise ValueError("Invalid event evaluation parameters")
+
+    evaluation = eval_data[["recording", "fusion_time_s", LABEL_COLUMN]].copy()
+    evaluation["prediction"] = np.asarray(predictions, dtype=int)
+    event_count = detected_count = 0
+    delays = []
+    for recording, group in evaluation.groupby("recording", sort=False):
+        group = group.sort_values("fusion_time_s", kind="stable")
+        times = group["fusion_time_s"].to_numpy(dtype=float)
+        actual = group[LABEL_COLUMN].to_numpy(dtype=int)
+        predicted = group["prediction"].to_numpy(dtype=int)
+        if len(times) > 1 and np.any(np.diff(times) <= 0):
+            raise ValueError(f"Non-increasing times in recording {recording}")
+
+        starts = np.flatnonzero((actual == 1) & (np.r_[0, actual[:-1]] == 0))
+        ends = np.flatnonzero((actual == 1) & (np.r_[actual[1:], 0] == 0))
+        for start, end in zip(starts, ends):
+            if start == 0:
+                continue  # Left-censored event: actual entry time unknown
+            event_count += 1
+            deadline = min(times[start] + maxDelaySeconds, times[end])
+            for index in range(start, end - consecutiveFrames + 2):
+                final_index = index + consecutiveFrames - 1
+                if times[final_index] > deadline:
+                    break
+                if np.all(predicted[index:final_index + 1] == 1):
+                    detected_count += 1
+                    # Confirmation time, not just the first positive frame
+                    delays.append(float(times[final_index] - times[start]))
+                    break
+
+    return {
+        "Event Pd (%)": 100.0 * detected_count / event_count if event_count else np.nan,
+        "Events": event_count,
+        "Detected Events": detected_count,
+        "Mean Event Delay (s)": float(np.mean(delays)) if delays else np.nan,
+    }
+
+
+# Initial operating points; tune ONLY on the validation recordings.
+# Model confidence is the class-1 predict_proba output, not a hard prediction.
+MAYBE_ENTER = 0.60  
+MAYBE_EXIT = 0.45   
+INTRUDER_ENTER = 0.80
+INTRUDER_EXIT = 0.70
+
+NO_INTRUDER, MAYBE_INTRUDER, INTRUDER = 0, 1, 2
+
+
+def applyThreeState(confidences, eval_data, maybe_enter=MAYBE_ENTER,
+                    maybe_exit=MAYBE_EXIT, intruder_enter=INTRUDER_ENTER,
+                    intruder_exit=INTRUDER_EXIT):
+    """Causal state machine; reset independently for each recording.
+
+    The asymmetric enter/exit thresholds provide hysteresis. State 1 and 2
+    both constitute an alert, but only state 2 is a confirmed alert.
+    """
+    if not (0 <= maybe_exit < maybe_enter < intruder_exit < intruder_enter <= 1):
+        raise ValueError("Threshold order must be maybe_exit < maybe_enter < "
+                         "intruder_exit < intruder_enter, within [0, 1]")
+    scores = np.asarray(confidences, dtype=float)
+    if len(scores) != len(eval_data) or not np.isfinite(scores).all():
+        raise ValueError("Confidence must be finite and aligned to evaluation rows")
+    states = np.zeros(len(scores), dtype=int)
+    # Grouping with sort=False preserves input row order within each recording.
+    for _, positions in pd.Series(np.arange(len(scores))).groupby(eval_data["recording"].to_numpy(), sort=False):
+        indices = positions.to_numpy(dtype=int)
+        indices = indices[np.argsort(eval_data.iloc[indices]["fusion_time_s"].to_numpy(), kind="stable")]
+        state = NO_INTRUDER
+        for index in indices:
+            score = scores[index]
+            if state == NO_INTRUDER:
+                if score >= intruder_enter:
+                    state = INTRUDER
+                elif score >= maybe_enter:
+                    state = MAYBE_INTRUDER
+            elif state == MAYBE_INTRUDER:
+                if score >= intruder_enter:
+                    state = INTRUDER
+                elif score < maybe_exit:
+                    state = NO_INTRUDER
+            else:
+                if score < intruder_exit:
+                    state = MAYBE_INTRUDER if score >= maybe_exit else NO_INTRUDER
+            states[index] = state
+    return states
+
+
+def confidenceScores(model, X):
+    """Continuous class-1 probability estimate from the fitted pipeline."""
+    if not hasattr(model, "predict_proba"):
+        raise ValueError("All classifiers must support predict_proba")
+    classes = list(model.classes_)
+    if 1 not in classes:
+        raise ValueError("Classifier was not trained with positive class 1")
+    return np.asarray(model.predict_proba(X)[:, classes.index(1)], dtype=float)
+
+
+def addOutboundEvaluationLabels(eval_data):
+    """Read outbound labels at validation timestamps; never used for training."""
+    required = {"recording", "fusion_time_s"}
+    if not required.issubset(eval_data.columns):
+        raise ValueError("Validation data must include recording and fusion_time_s")
+    evaluation = eval_data.copy()
+    outbound = np.zeros(len(evaluation), dtype=np.uint8)
+    for recording, positions in evaluation.groupby("recording", sort=False).indices.items():
+        label_path = Path(recording) / "labels(outbound).csv"
+        if not label_path.is_file():
+            raise FileNotFoundError(f"Missing outbound evaluation labels: {label_path}")
+        intervals = pd.read_csv(label_path)
+        if not {"start_s", "end_s", "human"}.issubset(intervals.columns):
+            raise ValueError(f"Invalid outbound label columns in {label_path}")
+        times = evaluation.iloc[positions]["fusion_time_s"].to_numpy(dtype=float)
+        for start, end, human in intervals[["start_s", "end_s", "human"]].itertuples(index=False, name=None):
+            if int(human) == 1:
+                outbound[positions] |= ((times >= float(start)) & (times < float(end)))
+    evaluation["outbound_human"] = outbound
+    return evaluation
+
+
+def calculateStateMetrics(eval_data, states):
+    """Event Pd, confirmed event Pd, false alerts and confirmed false alerts."""
+    values = np.asarray(states, dtype=int)
+    any_alert = (values >= MAYBE_INTRUDER).astype(int)
+    confirmed = (values == INTRUDER).astype(int)
+    any_frame = calculateMetrics(eval_data[LABEL_COLUMN], any_alert)
+    # Application-specific Pfa: with inbound=0, MAYBE is acceptable only
+    # when the outbound labels indicate a human is visible to a sensor.
+    if "outbound_human" not in eval_data.columns:
+        raise ValueError("Outbound evaluation labels were not loaded")
+    inbound = eval_data[LABEL_COLUMN].to_numpy(dtype=int)
+    outbound = eval_data["outbound_human"].to_numpy(dtype=int)
+    if not np.isin(outbound, [0, 1]).all():
+        raise ValueError("Outbound evaluation labels must be binary")
+    negative = inbound == 0
+    false_alert = negative & ((values == INTRUDER) | ((values == MAYBE_INTRUDER) & (outbound == 0)))
+    any_frame["False Alarm Probability (%)"] = (
+        100.0 * np.count_nonzero(false_alert) / np.count_nonzero(negative)
+        if np.any(negative) else np.nan
+    )
+    confirmed_frame = calculateMetrics(eval_data[LABEL_COLUMN], confirmed)
+    any_events = calculateEventMetrics(eval_data, any_alert)
+    confirmed_events = calculateEventMetrics(eval_data, confirmed)
+    ward_any = analyze_events(eval_data, any_alert)
+    ward_confirmed = analyze_events(eval_data, confirmed)
+    return {
+        "Probability of Detection (%)": any_frame["Probability of Detection (%)"],
+        "False Alarm Probability (%)": any_frame["False Alarm Probability (%)"],
+        "Accuracy (%)": any_frame["Accuracy (%)"],
+        "Precision (%)": any_frame["Precision (%)"],
+        "F1 Score (%)": any_frame["F1 Score (%)"],
+        **any_events,
+        "Confirmed Event Pd (%)": confirmed_events["Event Pd (%)"],
+        "Confirmed False Alarm Probability (%)": confirmed_frame["False Alarm Probability (%)"],
+        "Confirmed Mean Event Delay (s)": confirmed_events["Mean Event Delay (s)"],
+        **{f"Ward {key}": value for key, value in ward_any.items()},
+        **{f"Ward Confirmed {key}": value for key, value in ward_confirmed.items()},
+        "Maybe Frames": int(np.count_nonzero(values == MAYBE_INTRUDER)),
+        "Intruder Frames": int(np.count_nonzero(values == INTRUDER)),
+    }
+
+
 def runDetectionSystem(train_data, test_data, featureColumns, systemName):
     """Train and evaluate every ML algorithm for one sensor configuration."""
     X_train, X_test = prepareFeatures(
@@ -205,9 +374,9 @@ def runDetectionSystem(train_data, test_data, featureColumns, systemName):
 
         try:
             model.fit(X_train, y_train)
-            predictions = model.predict(X_test)
-
-            metrics = calculateMetrics(y_test, predictions)
+            scores = confidenceScores(model, X_test)
+            states = applyThreeState(scores, test_data)
+            metrics = calculateStateMetrics(test_data, states)
             results[name] = metrics
 
             print(
@@ -230,12 +399,21 @@ def runDetectionSystem(train_data, test_data, featureColumns, systemName):
                 "Accuracy (%)": np.nan,
                 "Precision (%)": np.nan,
                 "F1 Score (%)": np.nan,
+                "Event Pd (%)": np.nan,
+                "Events": np.nan,
+                "Detected Events": np.nan,
+                "Mean Event Delay (s)": np.nan,
+                "Confirmed Event Pd (%)": np.nan,
+                "Confirmed False Alarm Probability (%)": np.nan,
+                "Confirmed Mean Event Delay (s)": np.nan,
+                **{f"Ward {key}": np.nan for key in ("C", "D", "F", "M", "FM", "I", "TrueEvents", "PredEvents", "Preexisting", "Eligible", "NewDetected", "Overfill s", "Underfill s", "Fresh Event Pd (%)", "Fresh Event Delay (s)")},
+                **{f"Ward Confirmed {key}": np.nan for key in ("C", "D", "F", "M", "FM", "I", "TrueEvents", "PredEvents", "Preexisting", "Eligible", "NewDetected", "Overfill s", "Underfill s", "Fresh Event Pd (%)", "Fresh Event Delay (s)")},
             }
 
     return results
 
 
-def runModels(train_data, test_data, outputPath="model_comparison_results.csv"):
+def runModels(train_data, test_data, outputPath=None):
     """
     Compare feature fusion against PIR-only detection.
 
@@ -252,16 +430,18 @@ def runModels(train_data, test_data, outputPath="model_comparison_results.csv"):
     if not set(y_test.unique()).issubset({0, 1}):
         raise ValueError("Test labels must be 0 or 1.")
 
+    # Outbound labels are used for evaluation only, never feature extraction or fitting.
+    test_data = addOutboundEvaluationLabels(test_data)
+
     pirFeatures = [
         column for column in train_data.columns
         if column.startswith("pir_")
-        and column != "pir_valid"
+        and column not in {"pir_valid", "pir_meanSignalEnergy"}
     ]
 
     thermalFeatures = [
         column for column in train_data.columns
-        if column.startswith("thermal_")
-        and column != "thermal_track_id"
+        if column.startswith("thermal_") and column != "thermal_track_id"
     ]
 
     fusedFeatures = pirFeatures + thermalFeatures
@@ -314,6 +494,8 @@ def runModels(train_data, test_data, outputPath="model_comparison_results.csv"):
             "Fused False Alarm Probability (%)": fusedFa,
             "PIR-Only Probability of Detection (%)": pirPd,
             "PIR-Only False Alarm Probability (%)": pirFa,
+            "Pd Change (percentage points)": fusedPd - pirPd,
+            "False Alarm Change (percentage points)": pirFa - fusedFa,
             "Probability of Detection Improvement (%)": percentageImprovement(
                 fusedPd,
                 pirPd,
@@ -325,8 +507,28 @@ def runModels(train_data, test_data, outputPath="model_comparison_results.csv"):
                 reduction=True,
             ),
                         "Fused Accuracy (%)": fused["Accuracy (%)"],
+            "PIR-Only Accuracy (%)": pir["Accuracy (%)"],
+            "Accuracy Improvement (%)": percentageImprovement(
+                fused["Accuracy (%)"], pir["Accuracy (%)"]
+            ),
+            "PIR-Only Precision (%)": pir["Precision (%)"],
             "Fused Precision (%)": fused["Precision (%)"],
+            "PIR-Only F1 Score (%)": pir["F1 Score (%)"],
             "Fused F1 Score (%)": fused["F1 Score (%)"],
+            "PIR-Only Event Pd (%)": pir["Event Pd (%)"],
+            "Fused Event Pd (%)": fused["Event Pd (%)"],
+            "PIR-Only Confirmed Event Pd (%)": pir["Confirmed Event Pd (%)"],
+            "Fused Confirmed Event Pd (%)": fused["Confirmed Event Pd (%)"],
+            "PIR-Only Confirmed Pfa (%)": pir["Confirmed False Alarm Probability (%)"],
+            "Fused Confirmed Pfa (%)": fused["Confirmed False Alarm Probability (%)"],
+            "PIR-Only Detected Events": pir["Detected Events"],
+            "Fused Detected Events": fused["Detected Events"],
+            "Evaluated Events": fused["Events"],
+            "PIR-Only Mean Event Delay (s)": pir["Mean Event Delay (s)"],
+            "Fused Mean Event Delay (s)": fused["Mean Event Delay (s)"],
+            **{f"Fused Ward {key}": fused[f"Ward {key}"] for key in ("C", "D", "F", "M", "FM", "I", "TrueEvents", "PredEvents", "Preexisting", "Eligible", "NewDetected", "Overfill s", "Underfill s", "Fresh Event Pd (%)", "Fresh Event Delay (s)")},
+            **{f"PIR-Only Ward {key}": pir[f"Ward {key}"] for key in ("C", "D", "F", "M", "FM", "I", "TrueEvents", "PredEvents", "Preexisting", "Eligible", "NewDetected", "Overfill s", "Underfill s", "Fresh Event Pd (%)", "Fresh Event Delay (s)")},
+            **{f"Fused Ward Confirmed {key}": fused[f"Ward Confirmed {key}"] for key in ("C", "D", "F", "M", "FM", "I", "Fresh Event Pd (%)", "Fresh Event Delay (s)")},
         })
 
     results_df = pd.DataFrame(comparisonRows)
@@ -347,7 +549,92 @@ def runModels(train_data, test_data, outputPath="model_comparison_results.csv"):
 
     print(display_df.to_string(index=False))
 
-    # Keep numeric percentage values in the CSV for later analysis.
-    results_df.to_csv(outputPath, index=False, float_format="%.4f")
+    # Optional text report when this function is called independently.
+    # main.py creates one combined text report for all window lengths.
+    if outputPath is not None:
+        from pathlib import Path
+        path = Path(outputPath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(formatResultsTable(results_df), encoding="utf-8")
+        print(f"Results saved to {path}")
 
     return results_df
+
+
+def formatResultsTable(results_df):
+    """Readable, plain-text comparison; metrics are FRAME-BASED only."""
+    headers = [
+        ("History Window (s)", "Win"),
+        ("Algorithm", "Model"),
+        ("PIR-Only Accuracy (%)", "PIR Acc"),
+        ("Fused Accuracy (%)", "Fusion Acc"),
+        ("Accuracy Improvement (%)", "Acc gain"),
+        ("PIR-Only Probability of Detection (%)", "PIR Pd"),
+        ("Fused Probability of Detection (%)", "Fusion Pd"),
+        ("PIR-Only False Alarm Probability (%)", "PIR Pfa"),
+        ("Fused False Alarm Probability (%)", "Fusion Pfa"),
+        ("False Alarm Probability Improvement (%)", "Pfa drop"),
+        ("PIR-Only Precision (%)", "PIR Prec"),
+        ("Fused Precision (%)", "Fusion Prec"),
+        ("PIR-Only F1 Score (%)", "PIR F1"),
+        ("Fused F1 Score (%)", "Fusion F1"),
+        ("PIR-Only Event Pd (%)", "PIR Event Pd"),
+        ("Fused Event Pd (%)", "Fusion Event Pd"),
+        ("PIR-Only Detected Events", "PIR Events"),
+        ("Fused Detected Events", "Fusion Events"),
+        ("Evaluated Events", "Total Events"),
+        ("PIR-Only Mean Event Delay (s)", "PIR Delay s"),
+        ("Fused Mean Event Delay (s)", "Fusion Delay s"),
+    ]
+    widths = [max(len(label), 7) for _, label in headers]
+    widths[1] = 23
+
+    def fmt(value, width, is_model=False):
+        if is_model:
+            return str(value).ljust(width)
+        if pd.isna(value):
+            return "N/A".rjust(width)
+        return f"{float(value):.2f}".rjust(width)
+
+    def line(fields):
+        return " | ".join(fields)
+
+    heading = line([label.ljust(width) for (_, label), width in zip(headers, widths)])
+    divider = "-" * len(heading)
+    lines = [
+        "OFFLINE PIR VS FEATURE-FUSION RESULTS (VALIDATION)",
+        "Accuracy, Pd, Pfa, precision and F1 are FRAME-based; Event Pd is event-based.",
+        "Event Pd = events detected within 10s / labelled entries (one positive frame required).",
+        "Each event is a 0->1 labelled transition per recording; left-censored entries are excluded.",
+        "Event delay is measured from entry to the first confirmed detection.",
+        "PIR Events and Fusion Events are detected counts; Total Events is the denominator.",
+        "Relative Acc gain = 100 * (Fusion Acc - PIR Acc) / PIR Acc.",
+        "Relative Pfa drop = 100 * (PIR Pfa - Fusion Pfa) / PIR Pfa.",
+        "N/A indicates an undefined metric or a failed model.",
+        "",
+        heading,
+        divider,
+    ]
+    for _, record in results_df.iterrows():
+        values = []
+        for key, label in headers:
+            if key not in record:
+                values.append("-".rjust(widths[len(values)]))
+            else:
+                values.append(fmt(record[key], widths[len(values)], is_model=key == "Algorithm"))
+        lines.append(line(values))
+    lines.append(divider)
+    lines.append("")
+    lines.append("Target checks: accuracy improvement >= 20%; Pfa reduction >= 50%.")
+    qualifying = results_df.loc[
+        (results_df["Accuracy Improvement (%)"] >= 20)
+        & (results_df["False Alarm Probability Improvement (%)"] >= 50)
+    ]
+    if qualifying.empty:
+        lines.append("No configuration meets BOTH relative targets in this validation run.")
+    else:
+        for _, row in qualifying.iterrows():
+            w = row.get("History Window (s)", "-")
+            lines.append(f"PASS BOTH: window={w}s, model={row['Algorithm']}")
+    lines.append("")
+    return "\n".join(lines)

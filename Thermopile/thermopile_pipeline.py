@@ -16,7 +16,7 @@ gaussianKernel = np.array([
 filterMode = "reflect"
 
 # Threshold
-fixed_threshold = 3.0 # When not using adaptive thresholding
+fixed_threshold = 2.5 # When not using adaptive thresholding
 background_protection_threshold = 2.0
 use_adaptive_threshold = False
 adaptive_coeffs = None # [a, b, c] TODO: Replace with proper coefficients
@@ -353,3 +353,136 @@ class ThermopilePipeline:
         self.last_scene_temp = scene_temp
 
         return results
+
+
+# Thermal features for offline and real-time sensor fusion
+THERMAL_CURRENT_FEATURE_NAMES = [
+    "number_of_blobs",
+    "total_foreground_pixels",
+    "max_z",
+    "scene_temperature",
+    "pixel_count",
+    "centroid_row",
+    "centroid_col",
+    "track_age_frames",
+    "centroid_speed_px_s",
+    "max_temperature_difference",
+]
+
+
+def thermalFeatureNames():
+    return THERMAL_CURRENT_FEATURE_NAMES
+
+
+def emptyThermalFeatures():
+    return {name: 0.0 for name in thermalFeatureNames()}
+
+def flattenDetection(detection, centroidSpeed):
+    features = detection.features
+    return {
+        "track_id": int(features.track_id),
+        "pixel_count": float(features.pixel_count),
+        "centroid_row": float(features.centroid[0]),
+        "centroid_col": float(features.centroid[1]),
+        "track_age_frames": float(features.track_age_frames),
+        "centroid_speed_px_s": float(centroidSpeed),
+        "max_temperature_difference": float(features.max_temperature_difference),
+    }
+
+
+def processThermopile(thermalData, metadata):
+    frameShape = tuple(int(value) for value in metadata["thermal_frame_shape"])
+    frameLength = int(np.prod(frameShape))
+    pixelColumns = [f"pixel_{i}" for i in range(frameLength)]
+
+    missing = [column for column in pixelColumns if column not in thermalData.columns]
+    if missing:
+        raise ValueError(f"Thermopile CSV is missing {len(missing)} pixel columns")
+
+    pipeline = ThermopilePipeline(frame_shape=frameShape)
+    background = np.asarray(metadata["thermal_background"], dtype=np.float64).reshape(frameShape)
+    sigma = np.asarray(metadata["thermal_sigma"], dtype=np.float64).reshape(frameShape)
+    pipeline.bg_model.bg[:] = background
+    pipeline.bg_model.sigma[:] = sigma
+    pipeline.bg_model._initialised = True
+
+    timestamps = thermalData["time_s"].to_numpy(dtype=np.float64)
+    frameRows = []
+    previousTrackPositions = {}
+
+    for frameIndex, (_, row) in enumerate(thermalData.iterrows()):
+        frame = row[pixelColumns].to_numpy(dtype=np.float64).reshape(frameShape)
+        detections = pipeline.process_frame(frame)
+        timestamp = float(timestamps[frameIndex])
+        flattened = []
+        updatedTrackPositions = dict(previousTrackPositions)
+
+        for detection in detections:
+            trackId = int(detection.features.track_id)
+            centroidRow = float(detection.features.centroid[0])
+            centroidCol = float(detection.features.centroid[1])
+            centroidSpeed = 0.0
+
+            if trackId in previousTrackPositions:
+                previousTime, previousRow, previousCol = previousTrackPositions[trackId]
+                dt = timestamp - previousTime
+                if dt > 0:
+                    centroidSpeed = float(
+                        np.hypot(
+                            centroidRow - previousRow,
+                            centroidCol - previousCol,
+                        ) / dt
+                    )
+
+            flattened.append(flattenDetection(detection, centroidSpeed))
+            updatedTrackPositions[trackId] = (timestamp, centroidRow, centroidCol)
+
+        previousTrackPositions = updatedTrackPositions
+
+        smoothedZ = pipeline.last_smoothed_z
+        flatZ = smoothedZ.reshape(-1)
+
+        frameRows.append({
+            "detections": flattened,
+            "number_of_blobs": len(flattened),
+            "total_foreground_pixels": float(sum(detection["pixel_count"] for detection in flattened)),
+            "primary_track_id": pipeline.primary_track_id,
+            "max_z": float(np.max(flatZ)),
+            "scene_temperature": float(pipeline.last_scene_temp),
+        })
+
+    return timestamps, frameRows
+
+
+def thermalFeaturesAtIndex(thermalRows, thermalIndex):
+    features = emptyThermalFeatures()
+    currentFrame = thermalRows[thermalIndex]
+    selectedTrackId = currentFrame["primary_track_id"]
+
+    features["number_of_blobs"] = float(currentFrame["number_of_blobs"])
+    features["total_foreground_pixels"] = float(currentFrame["total_foreground_pixels"])
+    features["max_z"] = float(currentFrame["max_z"])
+    features["scene_temperature"] = float(currentFrame["scene_temperature"])
+
+    if selectedTrackId is None:
+        return False, features
+
+    matching = [
+        detection
+        for detection in currentFrame["detections"]
+        if int(detection["track_id"]) == int(selectedTrackId)
+    ]
+    if not matching:
+        return False, features
+
+    currentPrimary = matching[0]
+    features["pixel_count"] = float(currentPrimary["pixel_count"])
+    features["centroid_row"] = float(currentPrimary["centroid_row"])
+    features["centroid_col"] = float(currentPrimary["centroid_col"])
+    features["track_age_frames"] = float(currentPrimary["track_age_frames"])
+    features["centroid_speed_px_s"] = float(currentPrimary["centroid_speed_px_s"])
+    features["max_temperature_difference"] = float(currentPrimary["max_temperature_difference"])
+
+    return True, features
+
+

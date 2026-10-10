@@ -30,16 +30,14 @@ def getHistoryFeatureVector(samples):
     # Calculate RMS
     rms = float(np.sqrt(np.mean(values ** 2)))
 
-    # Calculate Mean Signal Energy (Feature 4)
-    meanSignalEnergy = float(np.mean(values ** 2))
-
-    # Calculate Activity Duration (Feature 2)
+    # Total time active in the history window (rather than first-to-last
+    # threshold crossing). Estimate seconds per sample from PIR timestamps.
+    # This works with the same live and offline feature extraction function.
     active = np.abs(values) >= float(threshold)
-    if np.any(active):
-        timeActive = np.flatnonzero(active)
-        activityDuration = float(timestamps[timeActive[-1]] - timestamps[timeActive[0]])
-    else:
-        activityDuration = 0.0
+    intervals = np.diff(timestamps)
+    valid_intervals = intervals[np.isfinite(intervals) & (intervals > 0)]
+    sample_period = float(np.median(valid_intervals)) if valid_intervals.size else 0.0
+    activityDuration = float(np.count_nonzero(active) * sample_period)
 
     # Calculate Peak Separation (Feature 3)
     maxPeakIndex = int(np.argmax(values))
@@ -51,7 +49,6 @@ def getHistoryFeatureVector(samples):
         negativePeak,
         peakToPeak,
         rms,
-        meanSignalEnergy,
         activityDuration,
         peak_separation,
     ])
@@ -63,7 +60,6 @@ def getHistoryFeatureNames():
         "negativePeak",
         "peakToPeak",
         "rms",
-        "meanSignalEnergy",
         "activityDuration",
         "peakSeparation",
     ]
@@ -255,7 +251,6 @@ if __name__ == "__main__":
 
     processor = PIRProcessor(sample_queue)
 
-    print("PIR pipeline: rolling buffer with peak-to-peak amplitude, activity duration, peak separation, and mean signal energy")
     print("Keep the scene empty during background calibration.")
     print("Threshold default is not calibrated for this PCB.")
     acquisition.start()
@@ -271,3 +266,18 @@ if __name__ == "__main__":
         processor.stop()
         acquisition.stop()
         print("\nStopped.")
+
+
+# Offline PIR signal preprocessing; uses the same PIRProcessor as live sampling
+def preprocessPIR(pirData, initialBaseline, windowSeconds):
+    processor = PIRProcessor(initialBaseline=initialBaseline, windowTime=windowSeconds)
+    timestamps = pirData["time_s"].to_numpy(dtype=np.float64)
+    voltages = pirData["voltage"].to_numpy(dtype=np.float64)
+    relative = np.empty_like(voltages)
+
+    for index, (timestamp, voltage) in enumerate(zip(timestamps, voltages)):
+        relative[index] = processor.processSample(timestamp, voltage)
+
+    return timestamps, relative
+
+
