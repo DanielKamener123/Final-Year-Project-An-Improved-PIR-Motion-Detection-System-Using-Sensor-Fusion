@@ -114,44 +114,29 @@ def promptDataType():
         print("Please type 'training', 'validation' or 'testing'.")
 
 def chooseRun(split):
+    """Create a uniquely named recording folder; never reuse an existing one."""
     splitDir = DATASET_ROOT / split
     splitDir.mkdir(parents=True, exist_ok=True)
 
     while True:
-        choice = input("Use a new run or a current run? [new/current]: ").strip().lower()
-        if choice == "new":
-            runName = input("Enter a name for the new run: ")
-            if not runName:
-                print("Run name cannot be empty.")
-                continue
-            runDir = splitDir / runName
-            if runDir.exists():
-                print("That run already exists. Choose 'current' to add another recording to it.")
-                continue
-            runDir.mkdir(parents=True)
-            return runName, runDir
-
-        if choice == "current":
-            runs = sorted(path for path in splitDir.iterdir() if path.is_dir())
-            if not runs:
-                print("There are no current runs yet. Create a new run first.")
-                continue
-            print("Available runs:")
-            for index, run in enumerate(runs, start=1):
-                print(f"  {index}. {run.name}")
-            selection = input("Choose the run number or type its name: ").strip()
-            if selection.isdigit():
-                index = int(selection) - 1
-                if 0 <= index < len(runs):
-                    return runs[index].name, runs[index]
-            else:
-                runDir = splitDir / selection
-                if runDir.is_dir():
-                    return runDir.name, runDir
-            print("Could not find that run.")
+        runName = input("Recording name: ").strip()
+        if not runName or runName in (".", ".."):
+            print("Recording name cannot be empty or a relative path.")
             continue
+        if ("/" in runName or "\\" in runName or
+                any(char in runName for char in '<>:"|?*') or
+                any(ord(char) < 32 for char in runName) or
+                runName.endswith((" ", "."))):
+            print("Use a simple folder name without path separators or invalid filename characters.")
+            continue
+        runDir = splitDir / runName
+        try:
+            runDir.mkdir(exist_ok=False)
+        except FileExistsError:
+            print("That recording name already exists. Enter a unique name; recordings cannot be overwritten.")
+            continue
+        return runName, runDir
 
-        print("Please type 'new' or 'current'.")
 
 # Open Camera With Correct Settings
 def openCamera(cameraIndex):
@@ -371,15 +356,11 @@ def main():
     parser.add_argument("--camera", type=int, default=1, help="OpenCV camera index")
     args = parser.parse_args()
 
-    while input("Type 'start' to prepare a recording: ").strip().lower() != "start":
-        pass
-
     split = promptDataType()
     runName, runDir = chooseRun(split)
 
-    recordingName = time.strftime("recording_%Y%m%d_%H%M%S")
-    recordingDir = runDir / recordingName
-    recordingDir.mkdir(parents=True)
+    recordingName = runName
+    recordingDir = runDir
 
     pirPath = recordingDir / "pir.csv"
     thermalPath = recordingDir / "thermopile.csv"
@@ -489,7 +470,7 @@ def main():
         thermalFile.close()
         raise RuntimeError("ROCK did not start recording at the scheduled time")
 
-    print(f"Recording {split}/{runName}/{recordingName}")
+    print(f"Recording {split}/{runName}")
     print("Video, PIR and thermopile now share t = 0 at the scheduled start.")
 
     while input("Type 'stop' to finish this recording: ").strip().lower() != "stop":
@@ -568,7 +549,7 @@ def main():
     print(f"Saved {frameCount} video frames to {videoPath}")
     print(f"Saved video frame times to {videoFramesPath}")
     print(f"Saved session information to {metadataPath}")
-    print("Next step: label the video, convert the labels, then run main.py.")
+    print("Next step: label the video using Tools.synchronised_playback, then run offline processing.")
 
 
 if __name__ == "__main__":

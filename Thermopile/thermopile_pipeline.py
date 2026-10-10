@@ -355,8 +355,9 @@ class ThermopilePipeline:
         return results
 
 
-# Thermal features for offline and real-time sensor fusion
-THERMAL_CURRENT_FEATURE_NAMES = [
+
+def getThermalFeatureNames():
+    return [
     "number_of_blobs",
     "total_foreground_pixels",
     "max_z",
@@ -367,15 +368,11 @@ THERMAL_CURRENT_FEATURE_NAMES = [
     "track_age_frames",
     "centroid_speed_px_s",
     "max_temperature_difference",
-]
-
-
-def thermalFeatureNames():
-    return THERMAL_CURRENT_FEATURE_NAMES
+    ]
 
 
 def emptyThermalFeatures():
-    return {name: 0.0 for name in thermalFeatureNames()}
+    return {name: 0.0 for name in getThermalFeatureNames()}
 
 def flattenDetection(detection, centroidSpeed):
     features = detection.features
@@ -454,7 +451,7 @@ def processThermopile(thermalData, metadata):
     return timestamps, frameRows
 
 
-def thermalFeaturesAtIndex(thermalRows, thermalIndex):
+def getThermalFeatures(thermalRows, thermalIndex):
     features = emptyThermalFeatures()
     currentFrame = thermalRows[thermalIndex]
     selectedTrackId = currentFrame["primary_track_id"]
@@ -465,7 +462,7 @@ def thermalFeaturesAtIndex(thermalRows, thermalIndex):
     features["scene_temperature"] = float(currentFrame["scene_temperature"])
 
     if selectedTrackId is None:
-        return False, features
+        return features
 
     matching = [
         detection
@@ -473,7 +470,7 @@ def thermalFeaturesAtIndex(thermalRows, thermalIndex):
         if int(detection["track_id"]) == int(selectedTrackId)
     ]
     if not matching:
-        return False, features
+        return features
 
     currentPrimary = matching[0]
     features["pixel_count"] = float(currentPrimary["pixel_count"])
@@ -483,6 +480,6 @@ def thermalFeaturesAtIndex(thermalRows, thermalIndex):
     features["centroid_speed_px_s"] = float(currentPrimary["centroid_speed_px_s"])
     features["max_temperature_difference"] = float(currentPrimary["max_temperature_difference"])
 
-    return True, features
+    return features
 
 

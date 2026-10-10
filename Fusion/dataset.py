@@ -1,161 +1,128 @@
 import json
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
-from PIR.processing import (
-    preprocessPIR,
-    getCurrentFeatureNames,
-    getCurrentFeatureVector,
-    getHistoryFeatureNames,
-    getHistoryFeatureVector,
-)
-from Thermopile.thermopile_pipeline import (
-    processThermopile, thermalFeaturesAtIndex, thermalFeatureNames,
-)
+from PIR.processing import preprocessPIR, getCurrentFeatureNames, getHistoryFeatureNames, getCurrentFeatureVector, getHistoryFeatureVector
+from Thermopile.thermopile_pipeline import processThermopile, getThermalFeatures, getThermalFeatureNames
 
-# Gets Human/Not Human Labels From Video
-def loadLabels(recordingDir):
-    labelsPath = recordingDir / "labels.csv"
+# Gets Labels CSV File
+def loadLabels(labelPath):
+    labelsPath = labelPath / "labels.csv"
     if not labelsPath.exists():
         return None
 
     labels = pd.read_csv(labelsPath)
-    required = {"start_s", "end_s", "human"}
-    if not required.issubset(labels.columns):
-        raise ValueError(f"{labelsPath} must contain columns {sorted(required)}")
     return labels
 
-
 # Check If Time Is Within A Labelled Human Interval
-def labelAtTime(labels, relativeVideoTime):
+def labelAtTime(labels, videoTime):
     if labels.empty:
         return 0
-    active = labels[
-        (labels["start_s"] <= relativeVideoTime)
-        & (relativeVideoTime < labels["end_s"])
-        & (labels["human"] == 1)
-    ]
-    return int(not active.empty)
 
+    started = labels["start_s"] <= videoTime
+    notEnded = videoTime < labels["end_s"]
+    isHuman = labels["human"] == 1
+    active = labels[started & notEnded & isHuman]   
 
-def recordingFolders(datasetDir):
-    datasetDir = Path(datasetDir)
-    if not datasetDir.exists():
+    if active.empty:
+        return 0
+    else: 
+        return 1
+
+# Loads All Recroding Folders
+def recordingFolders(datasetPath):
+    datasetPath = Path(datasetPath)
+    if not datasetPath.exists():
         return []
-    return sorted(path.parent for path in datasetDir.rglob("metadata.json"))
+    
+    # Returns A List With All Folders Containing Metadata
+    return [path.parent for path in datasetPath.rglob("metadata.json")]
 
 
-def buildRecordingDataset(recordingDir, windowSeconds, maxPirAgePeriods=2.0):
-    recordingDir = Path(recordingDir)
-    labels = loadLabels(recordingDir)
+def buildRecordingDataset(recordingPath, windowSeconds):
+    recordingPath = Path(recordingPath)
+    labels = loadLabels(recordingPath)
+
+    # Makes Sure There Is A Label File
     if labels is None:
-        print(f"Skipping {recordingDir}: labels.csv not found")
+        print(f"Skipping {recordingPath}: labels not found")
         return pd.DataFrame()
 
-    with open(recordingDir / "metadata.json", "r", encoding="utf-8") as metadataFile:
+    # Opens Metadata File
+    with open(recordingPath / "metadata.json", "r", encoding="utf-8") as metadataFile:
         metadata = json.load(metadataFile)
 
-    pirData = pd.read_csv(recordingDir / metadata.get("pir_file", "pir.csv"))
-    thermalData = pd.read_csv(recordingDir / metadata.get("thermopile_file", "thermopile.csv"))
+    pirData = pd.read_csv(recordingPath / "pir.csv")
+    thermalData = pd.read_csv(recordingPath / "thermopile.csv")
 
+    # Makes Sure Both PIR And Thermopile Data Is Populated
     if pirData.empty or thermalData.empty:
-        print(f"Skipping {recordingDir}: one of the sensor CSV files is empty")
+        print(f"Skipping {recordingPath}: one of the sensor CSV files is empty")
         return pd.DataFrame()
 
-    pirTimestamps, pirRelative = preprocessPIR(
-        pirData,
-        metadata["pir_baseline_v"],
-        windowSeconds,
-    )
+    # Gets Timestamps With Relevant Data Associated With That Timestamp
+    pirTimestamps, pirRelative = preprocessPIR(pirData, metadata["pir_baseline_v"], windowSeconds)
     thermalTimestamps, thermalRows = processThermopile(thermalData, metadata)
 
     # No Fusion Decision Is Made Until The PIR History Buffer Is Full
     startTime = pirTimestamps[0] + windowSeconds
     endTime = pirTimestamps[-1]
-    if endTime <= startTime:
-        print(f"Skipping {recordingDir}: recording is shorter than the selected window")
-        return pd.DataFrame()
 
-    pirRate = float(metadata.get("pir_sample_rate_hz", 0.0))
-    maxPirAge = maxPirAgePeriods / pirRate if pirRate > 0 else np.inf
-
-    pirHistoryNames = getHistoryFeatureNames()
-    pirCurrentNames = getCurrentFeatureNames()
-    thermalNames = thermalFeatureNames()
+    pirHistoryFeatureNames = getHistoryFeatureNames()
+    pirCurrentFeatureNames = getCurrentFeatureNames()
+    thermalFeatureNames = getThermalFeatureNames()
     rows = []
 
-    validThermalIndices = np.flatnonzero(
-        (thermalTimestamps >= startTime)
-        & (thermalTimestamps <= endTime)
-    )
+    # Get Valid Thermopile Timestamps
+    validThermalTimestamp = np.flatnonzero((thermalTimestamps >= startTime)& (thermalTimestamps <= endTime))
 
-    for thermalIndex in validThermalIndices:
-        fusionTime = float(thermalTimestamps[thermalIndex])
-        pirStart = np.searchsorted(pirTimestamps, fusionTime - windowSeconds, side="right")
-        pirEnd = np.searchsorted(pirTimestamps, fusionTime, side="right")
+    for thermalIndex in validThermalTimestamp:
+        # Get Master Fusion Timestamp
+        fusionTimestamp = float(thermalTimestamps[thermalIndex])
+
+        # Get PIR Window Timestamps  
+        pirStart = np.searchsorted(pirTimestamps, fusionTimestamp - windowSeconds, side="right")
+        pirEnd = np.searchsorted(pirTimestamps, fusionTimestamp, side="right")
+        
+        # If No PIR Samples Exist, The Thermopile Frame Is Skipped
         if pirEnd <= pirStart:
             continue
 
+        # Gets Timestamp And Sample fOR Window Period
         pirSamples = list(zip(pirTimestamps[pirStart:pirEnd], pirRelative[pirStart:pirEnd]))
+
+        # Get PIR History and Current Features
         pirHistoryVector = np.asarray(getHistoryFeatureVector(pirSamples), dtype=np.float64)
-        if len(pirHistoryVector) != len(pirHistoryNames):
-            raise ValueError(
-                "PIR getFeatureVector() and getFeatureNames() return different lengths. "
-                "Update both together in PIR/processing.py."
-            )
+        pirCurrentVector = (np.asarray(getCurrentFeatureVector(pirRelative[pirEnd - 1]), dtype=np.float64))
 
-        latestPirIndex = pirEnd - 1
-        pirAge = float(fusionTime - pirTimestamps[latestPirIndex])
-        pirValid = int(pirAge <= maxPirAge)
-        pirCurrentVector = (
-            np.asarray(getCurrentFeatureVector(pirRelative[latestPirIndex]), dtype=np.float64)
-            if pirValid
-            else np.zeros(len(pirCurrentNames), dtype=np.float64)
-        )
+        # Get Thermal Features
+        thermalFeatures = getThermalFeatures(thermalRows,int(thermalIndex))
 
-        thermalDetected, thermalFeatures = thermalFeaturesAtIndex(
-            thermalRows,
-            int(thermalIndex),
-        )
-
-        relativeVideoTime = float(fusionTime)
+        relativeVideoTime = float(fusionTimestamp)
 
         row = {
-            "recording": str(recordingDir),
-            "fusion_time_s": float(fusionTime),
-            "video_time_s": relativeVideoTime,
-            "window_seconds": float(windowSeconds),
-            "pir_valid": pirValid,
-            "thermal_detected": int(thermalDetected),
+            "recording": str(recordingPath),
+            "fusionTime": float(fusionTimestamp),
+            "videoTime": relativeVideoTime,
+            "windowSeconds": float(windowSeconds),
             "human": labelAtTime(labels, relativeVideoTime),
         }
-        row.update({f"pir_{name}": float(value) for name, value in zip(pirCurrentNames, pirCurrentVector)})
-        row.update({f"pir_{name}": float(value) for name, value in zip(pirHistoryNames, pirHistoryVector)})
-        row.update({f"thermal_{name}": float(thermalFeatures[name]) for name in thermalNames})
+        row.update({f"pir{name.capitalize()}": float(value) for name, value in zip(pirCurrentFeatureNames, pirCurrentVector)})
+        row.update({f"pir{name.capitalize()}": float(value) for name, value in zip(pirHistoryFeatureNames, pirHistoryVector)})
+        row.update({f"thermal{name.capitalize()}": float(thermalFeatures[name]) for name in thermalFeatureNames})
         rows.append(row)
 
     return pd.DataFrame(rows)
 
 
-def buildDataset(datasetDir, windowSeconds, maxPirAgePeriods=2.0):
+def buildDataset(datasetPath, windowSeconds):
     allRows = []
-    folders = recordingFolders(datasetDir)
-    if not folders:
-        raise FileNotFoundError(f"No recording folders found under {datasetDir}")
+    folders = recordingFolders(datasetPath)
 
-    for recordingDir in folders:
-        print(f"Processing {recordingDir} ...")
-        data = buildRecordingDataset(
-            recordingDir,
-            windowSeconds,
-            maxPirAgePeriods=maxPirAgePeriods,
-        )
+    for recordingPath in folders:
+        data = buildRecordingDataset(recordingPath,windowSeconds)
         if not data.empty:
             allRows.append(data)
-
-    if not allRows:
-        raise ValueError(f"No labelled recordings could be processed under {datasetDir}")
 
     return pd.concat(allRows, ignore_index=True)

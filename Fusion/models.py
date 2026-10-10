@@ -1,5 +1,4 @@
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
@@ -9,7 +8,6 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.decomposition import PCA
-
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.ensemble import (
@@ -34,12 +32,12 @@ LABEL_COLUMN = "human"
 
 
 # Preprocessing
-scaled_preprocessing = [
+scaledFeatureVector = [
     SimpleImputer(strategy="median"),
     StandardScaler(),
 ]
 
-tree_preprocessing = [
+treePreprocessing = [
     SimpleImputer(strategy="median"),
 ]
 
@@ -49,19 +47,19 @@ tree_preprocessing = [
 def buildModels():
     return {
         "Logistic Regression": make_pipeline(
-            *scaled_preprocessing,
+            *scaledFeatureVector,
             LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
         ),
         "Linear SVM": make_pipeline(
-            *scaled_preprocessing,
+            *scaledFeatureVector,
             SVC(kernel="linear", probability=True, random_state=RANDOM_STATE),
         ),
         "RBF SVM": make_pipeline(
-            *scaled_preprocessing,
+            *scaledFeatureVector,
             SVC(kernel="rbf", probability=True, random_state=RANDOM_STATE),
         ),
         "Random Forest": make_pipeline(
-            *tree_preprocessing,
+            *treePreprocessing,
             RandomForestClassifier(
                 n_estimators=100,
                 random_state=RANDOM_STATE,
@@ -69,23 +67,23 @@ def buildModels():
             ),
         ),
         "k-Nearest Neighbours": make_pipeline(
-            *scaled_preprocessing,
+            *scaledFeatureVector,
             KNeighborsClassifier(n_neighbors=5),
         ),
         "Decision Tree": make_pipeline(
-            *tree_preprocessing,
+            *treePreprocessing,
             DecisionTreeClassifier(random_state=RANDOM_STATE),
         ),
         "Gradient Boosting": make_pipeline(
-            *tree_preprocessing,
+            *treePreprocessing,
             GradientBoostingClassifier(random_state=RANDOM_STATE),
         ),
         "Gaussian Naive Bayes": make_pipeline(
-            *scaled_preprocessing,
+            *scaledFeatureVector,
             GaussianNB(),
         ),
         "PCA + RBF SVM": make_pipeline(
-            *scaled_preprocessing,
+            *scaledFeatureVector,
             PCA(n_components=0.95),
             SVC(kernel="rbf", probability=True, random_state=RANDOM_STATE),
         ),
@@ -187,20 +185,20 @@ def calculateEventMetrics(eval_data, predictions, maxDelaySeconds=10.0, consecut
     cannot be determined. Detection must begin on/after the labelled entry and
     have consecutiveFrames positive samples within maxDelaySeconds and the event.
     """
-    required = {"recording", "fusion_time_s", LABEL_COLUMN}
+    required = {"recording", "fusionTime", LABEL_COLUMN}
     missing = required - set(eval_data.columns)
     if missing:
         raise ValueError(f"Cannot evaluate event Pd; missing columns: {sorted(missing)}")
     if consecutiveFrames < 1 or maxDelaySeconds <= 0:
         raise ValueError("Invalid event evaluation parameters")
 
-    evaluation = eval_data[["recording", "fusion_time_s", LABEL_COLUMN]].copy()
+    evaluation = eval_data[["recording", "fusionTime", LABEL_COLUMN]].copy()
     evaluation["prediction"] = np.asarray(predictions, dtype=int)
     event_count = detected_count = 0
     delays = []
     for recording, group in evaluation.groupby("recording", sort=False):
-        group = group.sort_values("fusion_time_s", kind="stable")
-        times = group["fusion_time_s"].to_numpy(dtype=float)
+        group = group.sort_values("fusionTime", kind="stable")
+        times = group["fusionTime"].to_numpy(dtype=float)
         actual = group[LABEL_COLUMN].to_numpy(dtype=int)
         predicted = group["prediction"].to_numpy(dtype=int)
         if len(times) > 1 and np.any(np.diff(times) <= 0):
@@ -259,7 +257,7 @@ def applyThreeState(confidences, eval_data, maybe_enter=MAYBE_ENTER,
     # Grouping with sort=False preserves input row order within each recording.
     for _, positions in pd.Series(np.arange(len(scores))).groupby(eval_data["recording"].to_numpy(), sort=False):
         indices = positions.to_numpy(dtype=int)
-        indices = indices[np.argsort(eval_data.iloc[indices]["fusion_time_s"].to_numpy(), kind="stable")]
+        indices = indices[np.argsort(eval_data.iloc[indices]["fusionTime"].to_numpy(), kind="stable")]
         state = NO_INTRUDER
         for index in indices:
             score = scores[index]
@@ -292,9 +290,8 @@ def confidenceScores(model, X):
 
 def addOutboundEvaluationLabels(eval_data):
     """Read outbound labels at validation timestamps; never used for training."""
-    required = {"recording", "fusion_time_s"}
-    if not required.issubset(eval_data.columns):
-        raise ValueError("Validation data must include recording and fusion_time_s")
+    required = {"recording", "fusionTime"}
+
     evaluation = eval_data.copy()
     outbound = np.zeros(len(evaluation), dtype=np.uint8)
     for recording, positions in evaluation.groupby("recording", sort=False).indices.items():
@@ -304,11 +301,11 @@ def addOutboundEvaluationLabels(eval_data):
         intervals = pd.read_csv(label_path)
         if not {"start_s", "end_s", "human"}.issubset(intervals.columns):
             raise ValueError(f"Invalid outbound label columns in {label_path}")
-        times = evaluation.iloc[positions]["fusion_time_s"].to_numpy(dtype=float)
+        times = evaluation.iloc[positions]["fusionTime"].to_numpy(dtype=float)
         for start, end, human in intervals[["start_s", "end_s", "human"]].itertuples(index=False, name=None):
             if int(human) == 1:
                 outbound[positions] |= ((times >= float(start)) & (times < float(end)))
-    evaluation["outbound_human"] = outbound
+    evaluation["outboundHuman"] = outbound
     return evaluation
 
 
@@ -320,10 +317,10 @@ def calculateStateMetrics(eval_data, states):
     any_frame = calculateMetrics(eval_data[LABEL_COLUMN], any_alert)
     # Application-specific Pfa: with inbound=0, MAYBE is acceptable only
     # when the outbound labels indicate a human is visible to a sensor.
-    if "outbound_human" not in eval_data.columns:
+    if "outboundHuman" not in eval_data.columns:
         raise ValueError("Outbound evaluation labels were not loaded")
     inbound = eval_data[LABEL_COLUMN].to_numpy(dtype=int)
-    outbound = eval_data["outbound_human"].to_numpy(dtype=int)
+    outbound = eval_data["outboundHuman"].to_numpy(dtype=int)
     if not np.isin(outbound, [0, 1]).all():
         raise ValueError("Outbound evaluation labels must be binary")
     negative = inbound == 0
@@ -433,15 +430,11 @@ def runModels(train_data, test_data, outputPath=None):
     # Outbound labels are used for evaluation only, never feature extraction or fitting.
     test_data = addOutboundEvaluationLabels(test_data)
 
-    pirFeatures = [
-        column for column in train_data.columns
-        if column.startswith("pir_")
-        and column not in {"pir_valid", "pir_meanSignalEnergy"}
-    ]
+    pirFeatures = [ column for column in train_data.columns if column.startswith("pir")]
 
     thermalFeatures = [
         column for column in train_data.columns
-        if column.startswith("thermal_") and column != "thermal_track_id"
+        if column.startswith("thermal") and column != "thermal_track_id"
     ]
 
     fusedFeatures = pirFeatures + thermalFeatures
@@ -506,7 +499,7 @@ def runModels(train_data, test_data, outputPath=None):
                 pirFa,
                 reduction=True,
             ),
-                        "Fused Accuracy (%)": fused["Accuracy (%)"],
+            "Fused Accuracy (%)": fused["Accuracy (%)"],
             "PIR-Only Accuracy (%)": pir["Accuracy (%)"],
             "Accuracy Improvement (%)": percentageImprovement(
                 fused["Accuracy (%)"], pir["Accuracy (%)"]

@@ -11,7 +11,7 @@ from PIR.processing import (
     PIRProcessor,
     threshold,
     rollingWindow,
-    getHistoryFeatureNames,
+    getPIRFeatureNames,
 )
 
 RAIL_LOW_V = 0.05
@@ -28,7 +28,7 @@ def main():
     acquisition.start()
     processor.start()
 
-    feature_names = getHistoryFeatureNames()
+    feature_names = getPIRFeatureNames()
 
     # --- rolling buffers for plotting ---
     maxlen = int(DISPLAY_WINDOW_S * sampleRateHz * 1.5) + 10

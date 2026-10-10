@@ -31,20 +31,20 @@ def analyze_events(eval_data, predictions, max_delay_s=10.0):
     while the person is present. An event starting in alarm is counted as
     pre-existing, *not* as a fresh detection.
     """
-    required = {"recording", "fusion_time_s", "human"}
+    required = {"recording", "fusionTime", "human"}
     if not required.issubset(eval_data.columns):
         raise ValueError(f"Missing required columns: {sorted(required-set(eval_data.columns))}")
     output = np.asarray(predictions, dtype=int)
     if len(output) != len(eval_data) or not np.isin(output, [0, 1]).all():
         raise ValueError("Predictions must be aligned binary 0/1 values")
-    groups = eval_data[["recording", "fusion_time_s", "human"]].copy()
+    groups = eval_data[["recording", "fusionTime", "human"]].copy()
     groups["prediction"] = output
     counts = {k: 0 for k in ("C", "D", "F", "M", "FM", "I", "PredEvents", "TrueEvents", "Preexisting", "Eligible", "NewDetected")}
     delays = []
     overfill_s = underfill_s = 0.0
     for recording, group in groups.groupby("recording", sort=False):
-        group = group.sort_values("fusion_time_s", kind="stable")
-        times = group["fusion_time_s"].to_numpy(dtype=float)
+        group = group.sort_values("fusionTime", kind="stable")
+        times = group["fusionTime"].to_numpy(dtype=float)
         gt = group["human"].to_numpy(dtype=int)
         pred = group["prediction"].to_numpy(dtype=int)
         if not np.isfinite(times).all() or np.any(np.diff(times) <= 0):

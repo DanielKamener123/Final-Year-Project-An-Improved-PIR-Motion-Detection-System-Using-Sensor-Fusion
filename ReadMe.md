@@ -1,18 +1,6 @@
-# Project Data Collection and Fusion
+# Project Data Collection and Sensor Fusion
 
-This version uses a deliberately simple timing system.
-
-The **video is timestamped on the PC**, while the **PIR and thermopile are timestamped on the ROCK 4C+**. Immediately before each recording, the PC measures the fixed time offset between the two clocks. The PC then chooses a start time `T0` about 2 seconds in the future and tells the ROCK the equivalent ROCK-clock start time.
-
-Both machines are already initialised and waiting before `T0`. At `T0` they begin **saving** data. Every saved file also contains `time_s`, which is simply:
-
-```text
-time_s = seconds since T0
-```
-
-All later labelling and fusion uses `time_s`, so the rest of the project does not need to care whether the original timestamp came from the PC or the ROCK.
-
----
+This project records synchronised video, PIR measurements and MLX90640 thermopile frames. The PC timestamps video and the ROCK 4C+ timestamps the two sensors. Just before each recording, the PC measures the clock offset and schedules a common start time (`T0`) approximately two seconds in the future. Every data stream uses `time_s` (seconds since `T0`) for playback, labelling and sensor fusion.
 
 ## 1. Start the ROCK 4C+
 
@@ -22,331 +10,137 @@ On the ROCK, open a terminal in the project directory and run:
 python -m Collection.rock_agent
 ```
 
-## 2. Start Data Collection on the PC
+## 2. Start data collection on the PC
 
 On the PC, run:
 
 ```bash
-python -m Collection.pc_agent --host <ROCK_IP>
+python -m Collection.pc_agent --host <ROCK_IP> --camera 1
 ```
 
-Example:
+For example:
 
 ```bash
-python -m Collection.pc_collector --host 192.168.1.147 --camera 1
+python -m Collection.pc_agent --host 192.168.1.147 --camera 1
 ```
 
-The PC then asks whether the recording is training or testing data and which run it belongs to.
+Change the camera index if necessary (`--camera 0`, `1`, etc.). The program immediately asks:
 
----
+```text
+Is this training, validation or testing data? [training/validation/testing]: train
+Recording name: HomeTamTrain
+```
 
-## 3. What Happens Before Recording Starts
+Accepted data-type shortcuts are `train`/`training`, `val`/`validation` and `test`/`testing`.
 
-The collector automatically performs the following sequence:
+**Every collection is a new recording.** There is no `start` command and no `new/current` selection. The recording name is used as its folder name. If that folder already exists in the selected data-type directory, the program requests a different name instead of overwriting or adding to it.
+
+After you enter a unique recording name, the PC connects to the ROCK, waits for sensor readiness, warms up the camera, synchronises the clocks and schedules recording automatically. Keep the monitored area empty during sensor calibration. Once recording begins, type `stop` to finish.
+
+## 3. Recording folder layout
+
+A recording is saved directly inside the folder you named, under its data type:
+
+```text
+Datasets/
+├── training/
+│   └── HomeTamTrain/
+│       ├── pir.csv
+│       ├── thermopile.csv
+│       ├── video.mp4
+│       ├── video_frames.csv
+│       └── metadata.json
+├── validation/
+│   └── HomeTamValidate/
+│       ├── pir.csv
+│       ├── thermopile.csv
+│       ├── video.mp4
+│       ├── video_frames.csv
+│       └── metadata.json
+└── testing/
+    └── HomeTamTest/
+        ├── pir.csv
+        ├── thermopile.csv
+        ├── video.mp4
+        ├── video_frames.csv
+        └── metadata.json
+```
+
+There is **no extra `recording_YYYYMMDD_HHMMSS` subfolder**. The `metadata.json` file preserves the recording name, split, sensor settings, time synchronisation information and file names.
+
+## 4. How recording synchronisation works
 
 ```text
 PC                                      ROCK 4C+
  |                                          |
  |---- connect ---------------------------->|
- |                                          |
- |  open camera and keep grabbing frames   | sensors already warmed up
- |                                          |
+ |  warm up camera                         | warm up / calibrate sensors
  |---- clock sync ------------------------->|
  |<--- ROCK time ---------------------------|
- |                                          |
- | calculate: PC time - ROCK time          |
- |                                          |
- | choose common start time T0             |
- | about 2 seconds in the future           |
- |                                          |
- |---- START_AT equivalent ROCK time ------>|
- |                                          |
- | wait for T0                             | wait for T0
- |                                          |
- |========== SAME REAL MOMENT ==============|
- |                                          |
- | save video frames                       | save PIR samples
- |                                          | save thermopile frames
+ |  calculate PC minus ROCK clock offset   |
+ |  schedule common start T0               |
+ |---- START_AT (ROCK-clock T0) ----------->|
+ |  wait for T0                            | wait for T0
+ |============== COMMON T0 =================|
+ |  save video frames                      | stream PIR samples and thermal frames
 ```
 
-The network delay of the start command does not determine the start time. The command is sent **before** recording starts and tells both machines which future time to use.
+The network delay for the start command does not define the start time, because the command is sent ahead of `T0`.
 
----
+- `pir.csv`: `rock_timestamp, pc_timestamp, time_s, seq, voltage`
+- `thermopile.csv`: `rock_timestamp, pc_timestamp, time_s, seq, pixel_0, ...`
+- `video_frames.csv`: `frame_index, pc_timestamp, time_s`
+- `video.mp4`: recorded camera frames
+- `metadata.json`: common start, clock offset, sensor settings and collection statistics
 
-## 4. How Timestamps Are Stored
+The important alignment field is `time_s`. Video frames are timestamped individually in `video_frames.csv`; do not assume frame number divided by a nominal frame rate is the exact capture timestamp.
 
-### PIR
+## 5. Label recordings using synchronised playback
 
-Each PIR voltage is timestamped on the ROCK immediately after the ADC value has been read.
-
-`pir.csv` contains:
-
-```text
-rock_timestamp, pc_timestamp, time_s, seq, voltage
-```
-
-- `rock_timestamp`: original ROCK clock timestamp.
-- `pc_timestamp`: the same measurement converted onto the PC clock using the measured fixed offset.
-- `time_s`: seconds since the common recording start `T0`.
-- `seq`: sample sequence number.
-- `voltage`: raw PIR voltage.
-
-### Thermopile
-
-Each complete thermopile frame is timestamped on the ROCK immediately after the frame has been read.
-
-`thermopile.csv` contains:
-
-```text
-rock_timestamp, pc_timestamp, time_s, seq, pixel_0, ...
-```
-
-### Video
-
-The camera is opened and warmed **before** `T0`. Frames are continuously grabbed before the recording starts so the camera is already running. Those warm-up frames are discarded.
-
-Only frames completed at or after `T0` are saved.
-
-`video_frames.csv` contains:
-
-```text
-frame_index, pc_timestamp, time_s
-```
-
-The important column for later processing is `time_s`.
-
----
-
-## 5. Stop the Recording
-
-While the recording is running, type:
-
-```text
-stop
-```
-
-The PC stops the ROCK sensor streams and finishes writing the video.
-
-Each recording folder contains approximately:
-
-```text
-recording_YYYYMMDD_HHMMSS/
-├── pir.csv
-├── thermopile.csv
-├── video.mp4
-├── video_frames.csv
-└── metadata.json
-```
-
-`metadata.json` stores the measured PC/ROCK clock offset, the common start times, sensor configuration and recording information.
-
----
-
-# Video Labelling
-
-## 6. Convert the Video for Label Studio
-
-The video file is written with a fixed declared frame rate of 30 fps so that each saved frame remains one video frame.
-
-Use:
+**Label Studio is no longer used.** Use the project's synchronised playback and labelling tool instead:
 
 ```bash
-ffmpeg -i "video.mp4" -c:v libx264 -pix_fmt yuv420p -r 30 -fps_mode cfr -c:a aac -movflags +faststart "video_labelstudio.mp4"
+python -m Tools.synchronised_playback --recording "Datasets/training/HomeTamTrain"
 ```
 
-In the Label Studio configuration, use:
+The viewer displays the recorded video alongside the PIR and thermopile signals on their shared timeline. Use **HUMAN START** when a person enters the defined Inbound monitored area, and **HUMAN END** when no person remains inside it. Use **Save labels** (or press `S`) to save:
 
 ```text
-frameRate="30"
+Datasets/training/HomeTamTrain/labels.csv
 ```
 
-This lets Label Studio frame numbers map back to the rows in `video_frames.csv`.
-
----
-
-## 7. Label Human / No Human
-
-Label only the intervals where a human is present.
-
-For example:
+The saved `labels.csv` contains interval labels:
 
 ```text
-0.0 - 5.2 s      no human
-5.2 - 14.7 s     human
-14.7 - 22.0 s    no human
+start_s,end_s,human
+5.2,14.7,1
 ```
 
-The exact sensor and video timestamps do not have to be perfect to the millisecond. They only need to share the same recording timeline closely enough that a human visible in the video corresponds to the same period in the PIR and thermopile data.
+Intervals not labelled as human are treated as no human by the offline dataset loader. Check that all human-presence intervals are correctly marked before saving. The viewer provides play/pause, timeline navigation, undo and other review controls; press `Q` or `Esc` to exit.
 
-Export the Label Studio task as JSON and run:
+**Inbound labels** indicate that a human is physically inside the monitored area. If you are also maintaining `labels(outbound).csv` for your wider-field-of-view false-alarm evaluation, keep that separate from the training `labels.csv`. The current playback label-save operation writes `labels.csv` only; it does not automatically create the Outbound label file.
 
-```bash
-python -m Collection.labels \
-    --export <LABEL_EXPORT.json> \
-    --recording <RECORDING_FOLDER>
-```
+There is no video conversion, Label Studio export or `Collection.labels` conversion step in this workflow.
 
-Example:
+## 6. Offline feature extraction and fusion
 
-```bash
-python -m Collection.labels --export "Datasets/training/training_outdoors_2/recording_20260924_121936/labels.json" --recording "Datasets/training/training_outdoors_2/recording_20260924_121936"
-```
+The dataset loader (`Fusion/dataset.py`) finds recordings recursively by `metadata.json`, so it supports the new folder structure directly. It reads each recording's `labels.csv`, `pir.csv` and `thermopile.csv` and combines the sensor features at thermal-frame times using their shared timestamps.
 
-This creates:
+For example, for a 1-second PIR history window at `t = 10.0 s`:
 
 ```text
-labels.csv
+PIR measurements over approximately 9–10 s  -> PIR features
+Thermopile frame at t = 10 s                  -> thermal features
+PIR + thermal features                        -> fused feature vector
+Inbound label at t = 10 s                     -> binary training target
 ```
 
-with:
+The PIR window length and model selection are configured in the offline processing code. Training, validation and test recordings remain in their separate `Datasets/` folders. Do not mix testing recordings into the model-selection process.
 
-```text
-start_s, end_s, human
-```
-
-These times are on the same `time_s` timeline as the sensors.
-
----
-
-# Offline Processing and Sensor Fusion
-
-## 8. Configure the Fusion Window
-
-Open `main.py`.
-
-The main settings are:
-
-```python
-WINDOW_SECONDS = 1.0
-WINDOW_STEP_SECONDS = 0.25
-
-TRAIN_DATASET = Path("Datasets/training")
-TEST_DATASET = Path("Datasets/testing")
-```
-
-### `WINDOW_SECONDS`
-
-This is how much previous PIR history is used for one PIR feature vector.
-
-With:
-
-```python
-WINDOW_SECONDS = 1.0
-```
-
-and a PIR sampling rate of 25 Hz, approximately 25 PIR samples contribute to each window.
-
-### `WINDOW_STEP_SECONDS`
-
-This controls how often one combined fusion vector is created.
-
-With:
-
-```python
-WINDOW_STEP_SECONDS = 0.25
-```
-
-one new feature vector is generated every 250 ms.
-
-The windows therefore overlap.
-
----
-
-## 9. How One Fusion Row Is Produced
-
-At a fusion time such as:
-
-```text
-t = 10.00 s
-```
-
-the offline processing does approximately this:
-
-```text
-PIR samples from 9.00 s to 10.00 s
-             ↓
-       PIR features
-
-latest thermopile frame at/before 10.00 s
-             ↓
-    thermopile features
-
-PIR features + thermopile features
-             ↓
-     combined feature vector
-
-labels.csv at 10.00 s
-             ↓
-      human / no human
-```
-
-Everything uses the same `time_s` timeline.
-
----
-
-## 10. Run Processing and Machine Learning
-
-After the training and testing recordings have been labelled, run:
+Run the project's offline entry point from the project directory when the required recordings have been labelled:
 
 ```bash
 python main.py
 ```
 
-The program will:
-
-1. Load the raw PIR recordings.
-2. Load the raw thermopile recordings.
-3. Use their `time_s` timestamps.
-4. Re-run PIR processing and extract PIR features.
-5. Re-run thermopile processing and extract thermopile features.
-6. Match the features at common fusion times.
-7. Apply the human/no-human video label for that time.
-8. Build the training and testing feature datasets.
-9. Train the machine-learning models.
-10. Test the models and save their results.
-
-Outputs are stored under:
-
-```text
-Processed/
-└── window_1.00s_step_0.25s/
-    ├── train_features.csv
-    ├── test_features.csv
-    └── model_comparison_results.csv
-```
-
----
-
-# Simple Mental Model
-
-The entire collection process can be understood as:
-
-```text
-              COMMON START T0
-                    |
-        +-----------+-----------+
-        |           |           |
-       PIR      THERMOPILE    VIDEO
-        |           |           |
-      time_s      time_s      time_s
-        |           |           |
-        +-----------+-----------+
-                    |
-              raw recordings
-                    |
-              label video
-                    |
-               labels.csv
-                    |
-        process sensor data
-                    |
-        combined feature vector
-                    |
-            machine learning
-```
-
-The important rule is simply:
-
-> **All three streams share the same `t = 0`, and all later processing uses seconds since that start.**
-
-No camera-latency calibration, end-of-recording clock re-sync, or millisecond-level correction is required for this version.
+**Key principle:** video, PIR and thermopile data all use `time_s` relative to the same `T0`; recording names identify sessions without extra timestamp-named directories.
