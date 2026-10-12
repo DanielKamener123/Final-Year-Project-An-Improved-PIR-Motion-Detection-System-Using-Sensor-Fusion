@@ -123,9 +123,9 @@ class RealTimeSystem:
             frame = getFrame()
             timestamp = time.time()  # Timestamp immediately after a complete sensor read.
             if timestamp < ready_at:
+                self.thermal.process(timestamp, frame)
                 continue
-            # Advance thermal background/tracks on EVERY acquired thermal frame,
-            # even when PIR data is temporarily unavailable.
+            # Keep thermal tracking and background adaptation running even if PIR is unavailable.
             started = time.monotonic()
             thermal_features = self.thermal.process(timestamp, frame)
             if not self.pirProcessor.initialised or self.pirProcessor.lastError is not None:

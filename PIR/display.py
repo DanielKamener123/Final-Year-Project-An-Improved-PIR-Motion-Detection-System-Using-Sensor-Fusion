@@ -11,7 +11,7 @@ from PIR.processing import (
     PIRProcessor,
     threshold,
     rollingWindow,
-    getPIRFeatureNames,
+    getHistoryFeatureNames,
 )
 
 RAIL_LOW_V = 0.05
@@ -28,7 +28,7 @@ def main():
     acquisition.start()
     processor.start()
 
-    feature_names = getPIRFeatureNames()
+    feature_names = getHistoryFeatureNames()
 
     # --- rolling buffers for plotting ---
     maxlen = int(DISPLAY_WINDOW_S * sampleRateHz * 1.5) + 10
@@ -139,7 +139,11 @@ def main():
     # Keep A Reference - Otherwise The Animation Is Garbage Collected And The Plot Never Updates
     ani = animation.FuncAnimation(fig, update, interval=200, blit=False, cache_frame_data=False)
     plt.tight_layout()
-    plt.show()
+    try:
+        plt.show()
+    finally:
+        processor.stop()
+        acquisition.stop()
 
 if __name__ == "__main__":
     main()

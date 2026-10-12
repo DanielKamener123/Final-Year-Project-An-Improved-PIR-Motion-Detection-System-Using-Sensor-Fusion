@@ -62,7 +62,19 @@ class PIRAcquisition(threading.Thread):
             ts = time.time()
 
             # Add (Time, Voltage) To Queue
-            self.outQueue.put((ts, v))
+            try:
+                self.outQueue.put_nowait((ts, v))
+            except queue.Full:
+                # Preserve the newest readings instead of blocking acquisition.
+                try:
+                    self.outQueue.get_nowait()
+                    self.outQueue.task_done()
+                except queue.Empty:
+                    pass
+                try:
+                    self.outQueue.put_nowait((ts, v))
+                except queue.Full:
+                    pass
 
             # Set Time For Next Sample
             next_t += period

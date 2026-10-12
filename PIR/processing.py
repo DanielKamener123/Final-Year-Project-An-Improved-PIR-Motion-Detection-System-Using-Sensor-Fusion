@@ -16,7 +16,7 @@ rawHistoryBuffer = 20
 def getHistoryFeatureVector(samples):
     # Check For No Samples
     if not samples:
-        return np.zeros(7)
+        return np.zeros(6)
 
     # Gets Timestamps and Values from Samples In Seperate Arrays
     timestamps = np.asarray([ts for ts, _ in samples])
