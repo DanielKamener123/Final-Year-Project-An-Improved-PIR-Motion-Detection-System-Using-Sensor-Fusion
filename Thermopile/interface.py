@@ -1,5 +1,6 @@
 import adafruit_mlx90640
 import adafruit_extended_bus
+import time
 
 # Config
 I2C_BUS = 7
@@ -29,13 +30,16 @@ frame_buffer = [0.0] * 768  # 32 x 24
 
 # Reads Frame From Thermopile
 def getFrame():
-    while True:
+    # Do not block the entire live system indefinitely on a failing sensor.
+    for attempt in range(5):
         try:
             mlx.getFrame(frame_buffer)
             break
         except ValueError:
             # Read glitch
-            continue
+            if attempt == 4:
+                raise RuntimeError("MLX90640 frame read failed after 5 attempts")
+            time.sleep(0.02)
 
     return list(frame_buffer)
 

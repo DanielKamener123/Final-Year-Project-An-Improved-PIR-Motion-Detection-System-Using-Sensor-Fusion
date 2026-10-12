@@ -1,2 +1,0 @@
-Timing setup is handled automatically by Collection/pc_collector.py.
-No manual PC/ROCK clock matching is required before a recording.

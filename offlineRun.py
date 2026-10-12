@@ -8,14 +8,15 @@ from Fusion.models import runModels
 
 
 # Offline Fusion Configuration
-bufferWindows = [1.0, 1.5, 2.0, 2.5, 3.0]
+#bufferWindows = [1.0, 1.5, 2.0, 2.5, 3.0]
+bufferWindows = [1.0, 1.5]
 
 # Data Path
 trainingDataset = Path("Datasets/training")
 validationDataset = Path("Datasets/validation")
 outputPath = Path("Processed")
 
-def formatResults(results_df, run_name):
+def format_compact_results(results_df, run_name):
     """Format a short report without depending on Fusion.models reporting helpers."""
     columns = [
         ("History Window (s)", "Win"),
@@ -135,7 +136,7 @@ def main(run_name=None):
     if allResults:
         comparison = pd.concat(allResults, ignore_index=True)
         outputPath.mkdir(parents=True, exist_ok=True)
-        report = formatResults(comparison, safe_name)
+        report = format_compact_results(comparison, safe_name)
         # Write one simple tabulated text file. Never create a run folder or CSV.
         with output_path.open("x", encoding="utf-8") as file:
             file.write(report)

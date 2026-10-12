@@ -8,7 +8,7 @@ import numpy as np
 warmupTime = 10
 
 threshold = 0.2
-rollingWindow = 1
+rollingWindow = 1.5
 historyBuffer = 10
 rawHistoryBuffer = 20
 

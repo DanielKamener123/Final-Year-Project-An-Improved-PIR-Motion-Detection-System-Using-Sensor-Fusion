@@ -149,8 +149,8 @@ def openCamera(cameraIndex):
         return capture
 
     capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     capture.set(cv2.CAP_PROP_FPS, 30)
     capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return capture
@@ -169,7 +169,7 @@ def recordVideo(cameraIndex, videoPath, frameTimesPath, stopEvent, cameraReadyEv
         return
 
     firstFrame = None
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + 15.0
     while not stopEvent.is_set() and time.monotonic() < deadline:
         ok, frame = capture.read()
         if ok and frame is not None and frame.size:
@@ -179,7 +179,7 @@ def recordVideo(cameraIndex, videoPath, frameTimesPath, stopEvent, cameraReadyEv
 
     if firstFrame is None:
         capture.release()
-        videoInfo["error"] = "Camera opened but did not return a frame within 5 seconds."
+        videoInfo["error"] = "Camera opened but did not return a frame within 15 seconds."
         cameraReadyEvent.set()
         return
 
@@ -353,7 +353,7 @@ def main():
     parser = argparse.ArgumentParser(description="PC-side data-collection controller")
     parser.add_argument("--host", required=True, help="ROCK 4C+ IP address or hostname")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--camera", type=int, default=1, help="OpenCV camera index")
+    parser.add_argument("--camera", type=int, default=0, help="OpenCV camera index (DJI tested at 0)")
     args = parser.parse_args()
 
     split = promptDataType()
@@ -427,7 +427,7 @@ def main():
     print(f"Opening and warming camera index {args.camera}...")
     videoThread.start()
 
-    if not cameraReadyEvent.wait(timeout=7.0) or videoInfo.get("error"):
+    if not cameraReadyEvent.wait(timeout=20.0) or videoInfo.get("error"):
         receiveStopEvent.set()
         videoStopEvent.set()
         sock.close()

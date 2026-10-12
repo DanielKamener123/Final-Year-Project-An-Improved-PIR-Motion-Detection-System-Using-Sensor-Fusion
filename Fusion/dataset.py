@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from PIR.processing import preprocessPIR, getCurrentFeatureNames, getHistoryFeatureNames, getCurrentFeatureVector, getHistoryFeatureVector
-from Thermopile.thermopile_pipeline import processThermopile, getThermalFeatures, getThermalFeatureNames
+from Thermopile.processing import processThermopile, getThermalFeatures, getThermalFeatureNames
 
 # Gets Labels CSV File
 def loadLabels(labelPath):
@@ -80,6 +80,11 @@ def buildRecordingDataset(recordingPath, windowSeconds):
     for thermalIndex in validThermalTimestamp:
         # Get Master Fusion Timestamp
         fusionTimestamp = float(thermalTimestamps[thermalIndex])
+
+         # Skip Corrupted Section Of HomeGardenTam Recording
+        if recordingPath.name == "HomeGardenTam":
+            if 264.0 <= fusionTimestamp <= 342.0:
+                continue
 
         # Get PIR Window Timestamps  
         pirStart = np.searchsorted(pirTimestamps, fusionTimestamp - windowSeconds, side="right")

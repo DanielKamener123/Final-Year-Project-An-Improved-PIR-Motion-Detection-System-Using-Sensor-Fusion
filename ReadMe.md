@@ -1,7 +1,5 @@
 # Project Data Collection and Sensor Fusion
 
-This project records synchronised video, PIR measurements and MLX90640 thermopile frames. The PC timestamps video and the ROCK 4C+ timestamps the two sensors. Just before each recording, the PC measures the clock offset and schedules a common start time (`T0`) approximately two seconds in the future. Every data stream uses `time_s` (seconds since `T0`) for playback, labelling and sensor fusion.
-
 ## 1. Start the ROCK 4C+
 
 On the ROCK, open a terminal in the project directory and run:

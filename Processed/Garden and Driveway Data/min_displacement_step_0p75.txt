@@ -1,0 +1,29 @@
+OFFLINE VALIDATION: min_displacement_step_0p75
+Win     | Model                   | PIR ePd | Fuse ePd | Conf ePd | PIR Pfa | Fuse Pfa | Conf Pfa | Pfa drop | Fuse Acc | Acc gain
+----------------------------------------------------------------------------------------------------------------------------------
+   1.00 | RBF SVM                 |   98.18 |    96.36 |    94.55 |    3.57 |     3.74 |     2.32 |    -4.76 |    85.44 |    25.38
+   1.00 | Random Forest           |   98.18 |    96.36 |    94.55 |    7.88 |     2.27 |     0.79 |    71.22 |    86.74 |    30.71
+   1.50 | RBF SVM                 |   96.36 |    96.36 |    94.55 |    3.24 |     3.70 |     2.45 |   -14.04 |    85.73 |    25.28
+   1.50 | Random Forest           |   96.36 |    96.36 |    94.55 |    6.94 |     1.99 |     0.63 |    71.31 |    86.81 |    28.48
+----------------------------------------------------------------------------------------------------------------------------------
+
+ePd: event detection with MAYBE or INTRUDER; Pfa: INTRUDER outside inbound or MAYBE outside both inbound and outbound.
+Confirmed-event detection and confirmed-Pfa use INTRUDER alone.
+Thresholds are provisional and must be tuned on validation recordings.
+
+Targets: relative accuracy gain >= 20%; Pfa reduction >= 50%.
+PASS: window=1.00s; model=Random Forest
+PASS: window=1.50s; model=Random Forest
+
+WARD-STYLE EVENT QUALITY (FUSION, MAYBE OR INTRUDER)
+C=correct 1:1; D=missed; F=fragmented; M=merged; FM=both; I=inserted false alert.
+Pre=events already in alert immediately before entry.
+Fresh Pd counts a new OFF->ON alert within 10s; left-censored entries excluded.
+Counts are independent per recording. These are overlap-based diagnostics;
+not an exact implementation of every 2SET frame subcategory.
+Win     | Model                   | C       | D       | F       | M       | FM      | I       | Pre     | Fresh Pd | Delay s
+----------------------------------------------------------------------------------------------------------------------------
+   1.00 | RBF SVM                 |   35.00 |    2.00 |   14.00 |    1.00 |    3.00 |   23.00 |   13.00 |    72.73 |    1.11
+   1.00 | Random Forest           |   39.00 |    2.00 |   10.00 |    2.00 |    2.00 |   16.00 |    9.00 |    80.00 |    0.99
+   1.50 | RBF SVM                 |   37.00 |    2.00 |   12.00 |    1.00 |    3.00 |   22.00 |   11.00 |    76.36 |    0.96
+   1.50 | Random Forest           |   39.00 |    2.00 |    9.00 |    2.00 |    3.00 |   13.00 |    6.00 |    85.45 |    0.92

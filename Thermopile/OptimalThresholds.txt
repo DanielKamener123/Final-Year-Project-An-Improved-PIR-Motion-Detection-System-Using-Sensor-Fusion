@@ -1,3 +1,0 @@
-Temp,   Threshold
-
-17,     8

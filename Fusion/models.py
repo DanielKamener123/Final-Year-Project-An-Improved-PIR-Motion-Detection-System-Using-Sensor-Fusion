@@ -46,14 +46,14 @@ treePreprocessing = [
 # This keeps the feature-fusion and PIR-only systems independent.
 def buildModels():
     return {
-        "Logistic Regression": make_pipeline(
-            *scaledFeatureVector,
-            LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
-        ),
-        "Linear SVM": make_pipeline(
-            *scaledFeatureVector,
-            SVC(kernel="linear", probability=True, random_state=RANDOM_STATE),
-        ),
+        #"Logistic Regression": make_pipeline(
+        #    *scaledFeatureVector,
+        #    LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
+        #),
+        #"Linear SVM": make_pipeline(
+        #    *scaledFeatureVector,
+        #    SVC(kernel="linear", probability=True, random_state=RANDOM_STATE),
+        #),
         "RBF SVM": make_pipeline(
             *scaledFeatureVector,
             SVC(kernel="rbf", probability=True, random_state=RANDOM_STATE),
@@ -66,27 +66,7 @@ def buildModels():
                 n_jobs=-1,
             ),
         ),
-        "k-Nearest Neighbours": make_pipeline(
-            *scaledFeatureVector,
-            KNeighborsClassifier(n_neighbors=5),
-        ),
-        "Decision Tree": make_pipeline(
-            *treePreprocessing,
-            DecisionTreeClassifier(random_state=RANDOM_STATE),
-        ),
-        "Gradient Boosting": make_pipeline(
-            *treePreprocessing,
-            GradientBoostingClassifier(random_state=RANDOM_STATE),
-        ),
-        "Gaussian Naive Bayes": make_pipeline(
-            *scaledFeatureVector,
-            GaussianNB(),
-        ),
-        "PCA + RBF SVM": make_pipeline(
-            *scaledFeatureVector,
-            PCA(n_components=0.95),
-            SVC(kernel="rbf", probability=True, random_state=RANDOM_STATE),
-        ),
+
     }
 
 
