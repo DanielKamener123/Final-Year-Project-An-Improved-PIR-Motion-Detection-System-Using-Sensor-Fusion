@@ -3,6 +3,7 @@ import argparse
 import queue
 import threading
 import time
+import numpy as np
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
@@ -105,7 +106,7 @@ class RealTimeSystem:
         start = time.monotonic()
         warm_seconds = max(float(warmupTime) + 1, 20.0 / REFRESH_RATE_HZ)
         while not self.stopEvent.is_set():
-            frame = getFrame()
+            frame = np.asarray(getFrame(), dtype=np.float64).reshape(24, 32)
             calibrations.append(frame)
             remaining = max(0, int(round(warm_seconds - (time.monotonic() - start))))
             self.publish(warmup=f"WARM-UP: {remaining}s remaining — keep detection zone empty",
