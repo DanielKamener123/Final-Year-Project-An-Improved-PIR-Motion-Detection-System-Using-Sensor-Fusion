@@ -112,3 +112,44 @@ radxa@rock-4c-plus:~$ sudo cat /sys/kernel/debug/clk/clk_summary | grep -i i2c
           clk_i2c4_pmu               0       0        0        169000000   0          0     50000      N            deviceless                      no_connection_id         
           clk_i2c0_pmu               0       1        0        169000000   0          0     50000      N            ff3c0000.i2c                    i2c                      
 radxa@rock-4c-plus:~$ 
+
+
+
+
+radxa@rock-4c-plus:~$ od -An -tu4 -N4 --edian=big \
+> /proc/device-tree/i2c@ff160000/clock-frequency
+od: unrecognized option '--edian=big'
+Try 'od --help' for more information.
+radxa@rock-4c-plus:~$ od -An -tu4 -N4 --edian=big /proc/device-tree/i2c@ff160000/clock-frequency
+od: unrecognized option '--edian=big'
+Try 'od --help' for more information.
+radxa@rock-4c-plus:~$ od -An -tu4 -N4 --endian=big /proc/device-tree/i2c@ff160000/clock-frequency
+od: /proc/device-tree/i2c@ff160000/clock-frequency: No such file or directory
+radxa@rock-4c-plus:~$ ls /boot/dtbo/
+managed.list                               rk3399-spi1-spidev.dtbo.disabled
+rk3399-disable-fiq-debugger.dtbo.disabled  rk3399-spi1-waveshare35b.dtbo.disabled
+rk3399-dwc3-0-host.dtbo.disabled           rk3399-spi1-waveshare35.dtbo.disabled
+rk3399-dwc3-0-peripheral.dtbo.disabled     rk3399-spi2-jedec-nor.dtbo.disabled
+rk3399-gpio-ir.dtbo.disabled               rk3399-spi2-sc16is752.dtbo.disabled
+rk3399-i2c2-50khz.dtbo.disabled            rk3399-spi2-spidev.dtbo.disabled
+rk3399-i2c2.dtbo                           rk3399-uart2.dtbo.disabled
+rk3399-i2c6.dtbo.disabled                  rk3399-uart4.dtbo.disabled
+rk3399-i2c7-ds3231.dtbo.disabled           rk3399-vcc5v0_typec-gpio.dtbo.disabled
+rk3399-i2c7.dtbo                           rk3399-w1-gpio4-d6.dtbo.disabled
+rk3399-mali-enable.dtbo.disabled           rock-4c-plus-radxa-display-10fhd.dtbo.disabled
+rk3399-opp-1800.dtbo.disabled              rock-4c-plus-radxa-display-10hd.dtbo.disabled
+rk3399-pwm0.dtbo.disabled                  rock-4c-plus-radxa-display-8hd.dtbo.disabled
+rk3399-pwm1.dtbo.disabled                  rock-4c-plus-raspi-7inch-touchscreen.dtbo.disabled
+rk3399-pwm1-ir-rx.dtbo.disabled            rock-4-okdo-5mp-camera.dtbo.disabled
+rk3399-radxa-25w-poe.dtbo.disabled         rock-4-radxa-camera-8m.dtbo.disabled
+rk3399-spi1-cs-gpio-slb9670.dtbo.disabled  rock-4-rpi-camera-v1_3.dtbo.disabled
+rk3399-spi1-enc28j60.dtbo.disabled         rock-4-rpi-camera-v2.dtbo.disabled
+rk3399-spi1-jedec-nor.dtbo.disabled        rockchip-gpu-disable.dtbo.disabled
+rk3399-spi1-mcp2515-8mhz.dtbo.disabled     rockchip-watchdog.dtbo.disabled
+rk3399-spi1-mcp2518fd.dtbo.disabled
+radxa@rock-4c-plus:~$ ls /proc/device-tree/i2c@ff160000
+'#address-cells'        assigned-clocks   clocks       interrupts   phandle     pinctrl-names  '#size-cells'
+ assigned-clock-rates   clock-names       compatible   name         pinctrl-0   reg             status
+radxa@rock-4c-plus:~$ od -An -tu4 -N4 --endian=big /proc/device-tree/i2c@ff160000/clock-frequency
+od: /proc/device-tree/i2c@ff160000/clock-frequency: No such file or directory
+radxa@rock-4c-plus:~$ 
