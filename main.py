@@ -35,7 +35,7 @@ class LiveGUI:
         ttk.Label(panel, textvariable=self.warm, font=("Arial", 12)).pack(anchor="w", pady=(8, 12))
         cards = ttk.Frame(panel)
         cards.pack(fill="x")
-        for title, var in (("PIR STATE", self.pir), ("FUSED STATE", self.fusion)):
+        for title, var in (("PIR THRESHOLD", self.pir), ("FUSED STATE", self.fusion)):
             card = ttk.LabelFrame(cards, text=title, padding=14)
             card.pack(side="left", fill="x", expand=True, padx=(0, 8))
             ttk.Label(card, textvariable=var, font=("Arial", 14, "bold")).pack()
@@ -62,7 +62,7 @@ class LiveGUI:
 
 class RealTimeSystem:
     def __init__(self, folder):
-        self.model = RealtimeModel(folder / "fusion_rf.json", folder / "pir_rf.json")
+        self.model = RealtimeModel(folder / "fusion_rf.json")
         self.window = self.model.fusion.window
         self.acquisitionQueue = queue.Queue(maxsize=4096)
         self.pirAcquisition = PIRAcquisition(self.acquisitionQueue)

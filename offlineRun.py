@@ -25,6 +25,8 @@ def format_compact_results(results_df, run_name):
         ("Fused Event Pd (%)", "Fuse ePd"),
         ("Fused Confirmed Event Pd (%)", "Conf ePd"),
         ("PIR-Only False Alarm Probability (%)", "PIR Pfa"),
+        ("PIR-Only False Alert Episodes", "PIR false #"),
+        ("Fused False Alert Episodes", "Fuse false #"),
         ("Fused False Alarm Probability (%)", "Fuse Pfa"),
         ("Fused Confirmed Pfa (%)", "Conf Pfa"),
         ("False Alarm Probability Improvement (%)", "Pfa drop"),
@@ -58,7 +60,8 @@ def format_compact_results(results_df, run_name):
             for i, (key, _) in enumerate(columns)
         ]
         lines.append(join_cells(cells))
-    lines.extend([rule, "", "ePd: event detection with MAYBE or INTRUDER; Pfa: INTRUDER outside inbound or MAYBE outside both inbound and outbound.",
+    lines.extend([rule, "", "ePd: event detection with MAYBE or INTRUDER; Pfa is per fusion interval, not events per hour.",
+                  "False # counts runs of false-active fusion intervals; not full-rate PIR event counts.",
                   "Confirmed-event detection and confirmed-Pfa use INTRUDER alone.",
                   "Thresholds are provisional and must be tuned on validation recordings.",
                   "", "Targets: relative accuracy gain >= 20%; Pfa reduction >= 50%."])

@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from PIR.processing import preprocessPIR, getCurrentFeatureNames, getHistoryFeatureNames, getCurrentFeatureVector, getHistoryFeatureVector
+from PIR.processing import threshold as PIR_THRESHOLD, preprocessPIR, getCurrentFeatureNames, getHistoryFeatureNames, getCurrentFeatureVector, getHistoryFeatureVector
 from Thermopile.processing import processThermopile, getThermalFeatures, getThermalFeatureNames
 
 # Gets Labels CSV File
@@ -77,6 +77,7 @@ def buildRecordingDataset(recordingPath, windowSeconds):
     # Get Valid Thermopile Timestamps
     validThermalTimestamp = np.flatnonzero((thermalTimestamps >= startTime)& (thermalTimestamps <= endTime))
 
+    previousFusionTimestamp = None
     for thermalIndex in validThermalTimestamp:
         # Get Master Fusion Timestamp
         fusionTimestamp = float(thermalTimestamps[thermalIndex])
@@ -85,6 +86,19 @@ def buildRecordingDataset(recordingPath, windowSeconds):
         if recordingPath.name == "HomeGardenTam":
             if 264.0 <= fusionTimestamp <= 342.0:
                 continue
+
+        # The simple PIR detector runs at the PIR sampling rate, not merely at
+        # the most recent sample before a thermal frame. Preserve whether ANY
+        # sample exceeded threshold since the preceding fusion decision.
+        # This is an interval-wise OR, not a history-window persistence model.
+        interval_start = (previousFusionTimestamp if previousFusionTimestamp is not None
+                          else max(float(pirTimestamps[0]), fusionTimestamp - 1.0 / 2.0))
+        interval_begin = np.searchsorted(pirTimestamps, interval_start, side="right")
+        interval_end = np.searchsorted(pirTimestamps, fusionTimestamp, side="right")
+        interval_values = pirRelative[interval_begin:interval_end]
+        interval_peak = float(np.max(np.abs(interval_values))) if len(interval_values) else 0.0
+        interval_active = int(interval_peak >= float(PIR_THRESHOLD))
+        previousFusionTimestamp = fusionTimestamp
 
         # Get PIR Window Timestamps  
         pirStart = np.searchsorted(pirTimestamps, fusionTimestamp - windowSeconds, side="right")
@@ -112,6 +126,8 @@ def buildRecordingDataset(recordingPath, windowSeconds):
             "videoTime": relativeVideoTime,
             "windowSeconds": float(windowSeconds),
             "human": labelAtTime(labels, relativeVideoTime),
+            "pirThresholdIntervalActive": interval_active,
+            "pirThresholdIntervalPeak": interval_peak,
         }
         row.update({f"pir{name.capitalize()}": float(value) for name, value in zip(pirCurrentFeatureNames, pirCurrentVector)})
         row.update({f"pir{name.capitalize()}": float(value) for name, value in zip(pirHistoryFeatureNames, pirHistoryVector)})

@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import numpy as np
+from PIR.processing import threshold as PIR_THRESHOLD
 
 STATES = ("NO INTRUDER", "MAYBE INTRUDER", "INTRUDER")
 
@@ -58,20 +59,22 @@ class StateMachine:
         return STATES[self.state]
 
 class RealtimeModel:
-    def __init__(self, fusion_path, pir_path):
+    def __init__(self, fusion_path, pir_path=None):
+        # PIR-only is a fixed signal threshold, NOT a trained model.
         self.fusion = RandomForest(fusion_path)
-        self.pir = RandomForest(pir_path)
-        if self.fusion.window != self.pir.window:
-            raise ValueError("PIR and fusion models must use the same history window")
         self.fusion_state = StateMachine(self.fusion.thresholds)
-        self.pir_state = StateMachine(self.pir.thresholds)
 
     def predict(self, row):
-        pir_score = self.pir.confidence(row)
+        voltage = float(row["pirCurrentrelativevoltage"])
+        if not np.isfinite(voltage):
+            raise ValueError("Invalid PIR relative voltage")
+        pir_active = abs(voltage) >= float(PIR_THRESHOLD)
         fusion_score = self.fusion.confidence(row)
         return {
-            "pir_state": self.pir_state.update(pir_score),
+            "pir_state": "INTRUDER" if pir_active else "NO INTRUDER",
             "fusion_state": self.fusion_state.update(fusion_score),
-            "pir_confidence": pir_score,
+            "pir_confidence": None,
+            "pir_relative_voltage": voltage,
+            "pir_threshold": float(PIR_THRESHOLD),
             "fusion_confidence": fusion_score,
         }

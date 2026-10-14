@@ -1,4 +1,4 @@
-"""Train offline PIR-only and fused Random Forests; export trees for NumPy-only inference."""
+"""Train and export only the fused Random Forest; PIR baseline is thresholded."""
 import argparse
 import json
 from pathlib import Path
@@ -92,7 +92,7 @@ def main():
     current = ["pir" + n.capitalize() for n in getCurrentFeatureNames()]
     history = ["pir" + n.capitalize() for n in getHistoryFeatureNames()]
     thermal = ["thermal" + n.capitalize() for n in getThermalFeatureNames()]
-    for suffix, features in (("pir", current + history), ("fusion", current + history + thermal)):
+    for suffix, features in (("fusion", current + history + thermal),):
         missing = [name for name in features if name not in data.columns]
         if missing:
             raise ValueError(f"Missing training features: {missing}")

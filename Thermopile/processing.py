@@ -4,7 +4,7 @@ import numpy as np
 from scipy import ndimage
 
 # Config
-ALPHA = 0.990                 
+ALPHA = 0.995                 
 SIGMA_MIN = 0.05 # Minimum Sigma
 
 # Spatial filter
@@ -16,12 +16,10 @@ gaussianKernel = np.array([
 filterMode = "reflect"
 
 # Threshold
-threshold = 2.5
-thresholdBackgroundProtection = 1.5
+threshold = 2.25
 
-# Blob extraction
+# Blob extraction - TODO: Remove
 connectivity_8 = True
-min_blob_pixels = 1 # Blobs smaller than this are discarded
 
 # Feature scoring
 max_match_distance = 9
@@ -58,16 +56,17 @@ class BackgroundModel:
         new_sigma = np.maximum(new_sigma, SIGMA_MIN)
         self.sigma = np.where(update_mask, new_sigma, self.sigma)
 
-    # Calculate Z value - How many multiples of this pixels normal variation is present
+    # Calculate Z value - How much variation is present
     def z_score(self, frame):
         return np.abs(self.bg - frame) / self.sigma
 
-    # Calculate Mean Background Temp For Adaptive Thresholding
+    # Calculate Mean Background Temp
     def scene_temperature(self):
         return float(np.mean(self.bg))
 
 # Spatial filtering
 def gaussian_filter(z_grid):
+    #return z_grid
     return ndimage.convolve(z_grid, gaussianKernel, mode=filterMode)
 
 # Apply Threshold To Get Mask
@@ -98,8 +97,6 @@ def extract_blobs(binary_mask):
     for blob_id in range(1, num_blobs + 1):
         blob_mask = labelled_grid == blob_id
         pixel_count = int(blob_mask.sum())
-        if pixel_count < min_blob_pixels:
-            continue
 
         centroid = ndimage.center_of_mass(binary_mask, labelled_grid, blob_id)
         rows, cols = np.where(blob_mask)
@@ -227,12 +224,11 @@ class ThermopilePipeline:
         # Step 4: Threshold
         scene_temp = self.bg_model.scene_temperature()
         mask = apply_threshold(smoothed_z)
-        protection_mask = apply_threshold(smoothed_z, thresholdBackgroundProtection)
 
         temperature_difference = np.abs(frame - self.bg_model.bg)
 
         # Steps 1: Update Background + Sigma
-        self.bg_model.update(frame, protection_mask)
+        self.bg_model.update(frame, mask)
 
         # Step 5: Blob extraction
         blobs = extract_blobs(mask)

@@ -17,9 +17,6 @@ REFRESH_RATES = {
     64.0: adafruit_mlx90640.RefreshRate.REFRESH_64_HZ,
 }
 
-if REFRESH_RATE_HZ not in REFRESH_RATES:
-    raise ValueError(f"Unsupported MLX90640 refresh rate: {REFRESH_RATE_HZ} Hz")
-
 i2c = adafruit_extended_bus.ExtendedI2C(I2C_BUS, frequency=I2C_FREQUENCY)
 
 mlx = adafruit_mlx90640.MLX90640(i2c)

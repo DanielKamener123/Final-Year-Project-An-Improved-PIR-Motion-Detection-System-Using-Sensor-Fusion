@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 
 from Fusion.event_analysis import analyze_events
+from PIR.processing import threshold as PIR_THRESHOLD
 
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -309,6 +310,18 @@ def calculateStateMetrics(eval_data, states):
         100.0 * np.count_nonzero(false_alert) / np.count_nonzero(negative)
         if np.any(negative) else np.nan
     )
+    # Count distinct false-alert episodes (rising edges during negative labels).
+    # Distinct from Pfa and from the Ward event insertion diagnostic.
+    false_episode_count = 0
+    for _, positions in eval_data.groupby("recording", sort=False).indices.items():
+        indices = np.asarray(positions)
+        indices = indices[np.argsort(eval_data.iloc[indices]["fusionTime"].to_numpy())]
+        prior_false = False
+        for index in indices:
+            active_false = bool(false_alert[index])
+            if active_false and not prior_false:
+                false_episode_count += 1
+            prior_false = active_false
     confirmed_frame = calculateMetrics(eval_data[LABEL_COLUMN], confirmed)
     any_events = calculateEventMetrics(eval_data, any_alert)
     confirmed_events = calculateEventMetrics(eval_data, confirmed)
@@ -328,6 +341,7 @@ def calculateStateMetrics(eval_data, states):
         **{f"Ward Confirmed {key}": value for key, value in ward_confirmed.items()},
         "Maybe Frames": int(np.count_nonzero(values == MAYBE_INTRUDER)),
         "Intruder Frames": int(np.count_nonzero(values == INTRUDER)),
+        "False Alert Episodes": int(false_episode_count),
     }
 
 
@@ -394,9 +408,8 @@ def runModels(train_data, test_data, outputPath=None):
     """
     Compare feature fusion against PIR-only detection.
 
-    Both systems use the same rows, labels and ML algorithms. The only
-    difference is that the fused classifier receives PIR + thermopile
-    features, while the PIR-only classifier receives only PIR features.
+    Compare each trained fusion model to the same simple PIR voltage threshold.
+    The baseline has no ML training, and is evaluated on the same timestamps.
     """
     y_train = train_data[LABEL_COLUMN]
     y_test = test_data[LABEL_COLUMN]
@@ -410,7 +423,7 @@ def runModels(train_data, test_data, outputPath=None):
     # Outbound labels are used for evaluation only, never feature extraction or fitting.
     test_data = addOutboundEvaluationLabels(test_data)
 
-    pirFeatures = [ column for column in train_data.columns if column.startswith("pir")]
+    pirFeatures = [column for column in train_data.columns if column.startswith("pir") and not column.startswith("pirThresholdInterval")]
 
     thermalFeatures = [
         column for column in train_data.columns
@@ -439,16 +452,23 @@ def runModels(train_data, test_data, outputPath=None):
         "Feature Fusion",
     )
 
-    print("\n" + "#" * 70)
-    print("PIR-ONLY SYSTEM")
-    print(f"Features used: {len(pirFeatures)} PIR")
-    print("#" * 70)
-    pirResults = runDetectionSystem(
-        train_data,
-        test_data,
-        pirFeatures,
-        "PIR Only",
-    )
+    # True thresholded PIR baseline: mark a fusion-time interval active if
+    # ANY raw PIR sample crossed threshold since the preceding thermal frame.
+    # This avoids losing short threshold crossings between thermal frames.
+    if "pirThresholdIntervalActive" not in test_data.columns:
+        raise ValueError("Rebuild the dataset with the updated Fusion/dataset.py: "
+                         "pirThresholdIntervalActive is missing")
+    interval_active = pd.to_numeric(test_data["pirThresholdIntervalActive"], errors="raise").to_numpy()
+    if not np.isin(interval_active, [0, 1]).all():
+        raise ValueError("Nonbinary PIR interval flags in validation data")
+    pir_states = np.where(interval_active == 1, INTRUDER, NO_INTRUDER)
+    pir_metrics = calculateStateMetrics(test_data, pir_states)
+    print(f"\nPIR THRESHOLD BASELINE: ANY sample in thermal interval >= {PIR_THRESHOLD:g} V absolute deviation")
+    print(f"PIR threshold accuracy: {pir_metrics['Accuracy (%)']:.2f}%")
+    print(f"PIR baseline: {np.count_nonzero(interval_active)} active fusion intervals "
+          f"of {len(interval_active)}")
+    print("NOTE: Pfa is a percentage of evaluation intervals, NOT false alarm events/hour.")
+    pirResults = {name: pir_metrics for name in fusedResults}
 
     comparisonRows = []
 
@@ -494,6 +514,8 @@ def runModels(train_data, test_data, outputPath=None):
             "Fused Confirmed Event Pd (%)": fused["Confirmed Event Pd (%)"],
             "PIR-Only Confirmed Pfa (%)": pir["Confirmed False Alarm Probability (%)"],
             "Fused Confirmed Pfa (%)": fused["Confirmed False Alarm Probability (%)"],
+            "PIR-Only False Alert Episodes": pir["False Alert Episodes"],
+            "Fused False Alert Episodes": fused["False Alert Episodes"],
             "PIR-Only Detected Events": pir["Detected Events"],
             "Fused Detected Events": fused["Detected Events"],
             "Evaluated Events": fused["Events"],
@@ -507,7 +529,7 @@ def runModels(train_data, test_data, outputPath=None):
     results_df = pd.DataFrame(comparisonRows)
 
     print("\n" + "=" * 140)
-    print("FUSION VS PIR-ONLY COMPARISON")
+    print("FUSION VS THRESHOLDED PIR COMPARISON")
     print("=" * 140)
 
     display_df = results_df.copy()
