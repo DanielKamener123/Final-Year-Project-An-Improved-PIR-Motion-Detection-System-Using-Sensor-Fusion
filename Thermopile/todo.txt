@@ -153,3 +153,18 @@ radxa@rock-4c-plus:~$ ls /proc/device-tree/i2c@ff160000
 radxa@rock-4c-plus:~$ od -An -tu4 -N4 --endian=big /proc/device-tree/i2c@ff160000/clock-frequency
 od: /proc/device-tree/i2c@ff160000/clock-frequency: No such file or directory
 radxa@rock-4c-plus:~$ 
+
+
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "rockchip,rk3399";
+
+    fragment@0 {
+        target-path = "/i2c@ff160000";
+        __overlay__ {
+            clock-frequency = <400000>;
+        };
+    };
+};
