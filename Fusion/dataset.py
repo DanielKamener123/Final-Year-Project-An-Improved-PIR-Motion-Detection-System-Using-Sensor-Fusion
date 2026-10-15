@@ -61,9 +61,13 @@ def buildRecordingDataset(recordingPath, windowSeconds):
         print(f"Skipping {recordingPath}: one of the sensor CSV files is empty")
         return pd.DataFrame()
 
+    # Partial recordings can still be used after a dropout, but do not fuse
+    # across gaps: stale PIR/thermal values would contaminate training.
+    pirData = pirData.sort_values("time_s")
+    thermalData = thermalData.sort_values("time_s")
     # Gets Timestamps With Relevant Data Associated With That Timestamp
     pirTimestamps, pirRelative = preprocessPIR(pirData, metadata["pir_baseline_v"], windowSeconds)
-    thermalTimestamps, thermalRows = processThermopile(thermalData, metadata)
+    thermalTimestamps, thermalRows = processThermopile(thermalData, metadata, windowSeconds)
 
     # No Fusion Decision Is Made Until The PIR History Buffer Is Full
     startTime = pirTimestamps[0] + windowSeconds
@@ -78,9 +82,13 @@ def buildRecordingDataset(recordingPath, windowSeconds):
     validThermalTimestamp = np.flatnonzero((thermalTimestamps >= startTime)& (thermalTimestamps <= endTime))
 
     previousFusionTimestamp = None
+    maximumThermalGap = 1.0
     for thermalIndex in validThermalTimestamp:
         # Get Master Fusion Timestamp
         fusionTimestamp = float(thermalTimestamps[thermalIndex])
+        if thermalIndex and fusionTimestamp - thermalTimestamps[thermalIndex - 1] > maximumThermalGap:
+            previousFusionTimestamp = None
+            continue
 
          # Skip Corrupted Section Of HomeGardenTam Recording
         if recordingPath.name == "HomeGardenTam":
@@ -106,6 +114,13 @@ def buildRecordingDataset(recordingPath, windowSeconds):
         
         # If No PIR Samples Exist, The Thermopile Frame Is Skipped
         if pirEnd <= pirStart:
+            continue
+        selectedPIRTimes = pirTimestamps[pirStart:pirEnd]
+        # Require coverage throughout the window, with no excessive gap.
+        nominalPirPeriod = 1.0 / max(float(metadata.get("pir_sample_rate_hz") or 20.0), 1.0)
+        if (selectedPIRTimes[0] > fusionTimestamp - windowSeconds + 2 * nominalPirPeriod or
+            selectedPIRTimes[-1] < fusionTimestamp - 2 * nominalPirPeriod or
+            (len(selectedPIRTimes) > 1 and np.max(np.diff(selectedPIRTimes)) > max(0.3, 3 * nominalPirPeriod))):
             continue
 
         # Gets Timestamp And Sample fOR Window Period

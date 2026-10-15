@@ -107,8 +107,13 @@ def thermopileStreamLoop(conn, stopEvent, sendLock):
 
     # Keep Sending Frames Until Stop Condition Is Set
     while not stopEvent.is_set():
-        # Get Raw Frame Data
-        rawFrame = thermopile.getRawFrame()
+        # A thermopile outage must not terminate the PIR recording.
+        try:
+            rawFrame = thermopile.getRawFrame()
+        except Exception as exc:
+            print(f"Thermopile read failed: {exc}; retrying", flush=True)
+            time.sleep(0.5)
+            continue
 
         # Timestamp immediately after the complete frame has been read.
         rockTimestamp = time.time()

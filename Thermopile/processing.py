@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from collections import deque
 
 import numpy as np
 from scipy import ndimage
@@ -26,6 +27,17 @@ max_match_distance = 9
 max_missed_frames = 1
 min_primary_track_frames = 2
 min_displacement_step_px = 1  # Ignore small centroid jitter
+
+# Difference compared against the most recent frame about 0.5 seconds earlier.
+FD_LAG_SECONDS = 0.5
+FD_NOISE_THRESHOLD_C = 0.25  # Initial value; calibrate using empty-scene recordings.
+FD_MAX_GAP_SECONDS = 1.0     # Do not difference across sensor outages.
+FD_WINDOW_SECONDS = None     # Supplied by dataset/live caller; defaults to 2 s.
+FD_FEATURE_NAMES = [
+    "fd_mean_abs", "fd_max_abs", "fd_energy", "fd_active_pixels",
+    "fd_window_mean_energy", "fd_window_max_energy",
+    "fd_window_active_fraction", "fd_valid",
+]
 
 # Background Model Class
 class BackgroundModel:
@@ -204,6 +216,10 @@ class ThermopilePipeline:
         self.last_smoothed_z = np.zeros(frame_shape)
         self.last_threshold = threshold
         self.last_scene_temp = 0.0
+        self.fd_frames = deque(maxlen=128)
+        self.fd_activity = deque(maxlen=128)
+        self.fd_window_seconds = 2.0
+        self.fd_latest = {name: 0.0 for name in FD_FEATURE_NAMES}
 
     # Get Background Without Human
     def warm_start(self, calibration_frames):
@@ -213,8 +229,46 @@ class ThermopilePipeline:
         self._tracks = {}
         self._next_track_id = 1
         self.primary_track_id = None
+        self.fd_frames.clear()
+        self.fd_activity.clear()
+        self.fd_latest = {name: 0.0 for name in FD_FEATURE_NAMES}
 
-    def process_frame(self, frame):
+    def update_fd(self, frame, timestamp):
+        """Causal FD, never bridges an acquisition outage."""
+        timestamp = float(timestamp)
+        if self.fd_frames and timestamp <= self.fd_frames[-1][0]:
+            self.fd_frames.clear()
+            self.fd_activity.clear()
+        if self.fd_frames and timestamp - self.fd_frames[-1][0] > FD_MAX_GAP_SECONDS:
+            self.fd_frames.clear()
+            self.fd_activity.clear()
+        filtered = gaussian_filter(np.asarray(frame, dtype=np.float64))
+        target = timestamp - FD_LAG_SECONDS
+        previous = min(self.fd_frames, key=lambda item: abs(item[0] - target), default=None)
+        data = {name: 0.0 for name in FD_FEATURE_NAMES}
+        if previous is not None and previous[0] < timestamp and abs(previous[0] - target) <= 0.20:
+            absdiff = np.abs(filtered - previous[1])
+            data.update(fd_mean_abs=float(absdiff.mean()), fd_max_abs=float(absdiff.max()),
+                        fd_energy=float(np.mean(absdiff ** 2)),
+                        fd_active_pixels=float(np.count_nonzero(absdiff > FD_NOISE_THRESHOLD_C)),
+                        fd_valid=1.0)
+            self.fd_activity.append((timestamp, data["fd_energy"], data["fd_active_pixels"]))
+        self.fd_frames.append((timestamp, filtered))
+        while self.fd_frames and timestamp - self.fd_frames[0][0] > max(self.fd_window_seconds + FD_LAG_SECONDS, 3.0):
+            self.fd_frames.popleft()
+        while self.fd_activity and timestamp - self.fd_activity[0][0] > self.fd_window_seconds:
+            self.fd_activity.popleft()
+        if self.fd_activity:
+            energies = [v[1] for v in self.fd_activity]
+            data["fd_window_mean_energy"] = float(np.mean(energies))
+            data["fd_window_max_energy"] = float(max(energies))
+            data["fd_window_active_fraction"] = float(np.mean([v[2] > 0 for v in self.fd_activity]))
+        self.fd_latest = data
+
+    def process_frame(self, frame, timestamp=None):
+        if timestamp is not None:
+            self.update_fd(frame, timestamp)
+
         # Step 2: Z Score
         z = self.bg_model.z_score(frame)
 
@@ -353,6 +407,7 @@ def getThermalFeatureNames():
     "max_blob_age_frames",
     "max_blob_pixel_count",
     "max_blob_temperature_difference",
+    *FD_FEATURE_NAMES,
     ]
 
 
@@ -372,7 +427,7 @@ def flattenDetection(detection, centroidSpeed):
     }
 
 
-def processThermopile(thermalData, metadata):
+def processThermopile(thermalData, metadata, windowSeconds=2.0):
     frameShape = tuple(int(value) for value in metadata["thermal_frame_shape"])
     frameLength = int(np.prod(frameShape))
     pixelColumns = [f"pixel_{i}" for i in range(frameLength)]
@@ -382,6 +437,7 @@ def processThermopile(thermalData, metadata):
         raise ValueError(f"Thermopile CSV is missing {len(missing)} pixel columns")
 
     pipeline = ThermopilePipeline(frame_shape=frameShape)
+    pipeline.fd_window_seconds = float(windowSeconds)
     background = np.asarray(metadata["thermal_background"], dtype=np.float64).reshape(frameShape)
     sigma = np.asarray(metadata["thermal_sigma"], dtype=np.float64).reshape(frameShape)
     pipeline.bg_model.bg[:] = background
@@ -394,8 +450,8 @@ def processThermopile(thermalData, metadata):
 
     for frameIndex, (_, row) in enumerate(thermalData.iterrows()):
         frame = row[pixelColumns].to_numpy(dtype=np.float64).reshape(frameShape)
-        detections = pipeline.process_frame(frame)
         timestamp = float(timestamps[frameIndex])
+        detections = pipeline.process_frame(frame, timestamp)
         flattened = []
         updatedTrackPositions = dict(previousTrackPositions)
 
@@ -435,6 +491,7 @@ def processThermopile(thermalData, metadata):
             "primary_track_id": pipeline.primary_track_id,
             "max_z": float(np.max(flatZ)),
             "scene_temperature": float(pipeline.last_scene_temp),
+            "fd_features": dict(pipeline.fd_latest),
         })
 
     return timestamps, frameRows
@@ -449,6 +506,7 @@ def getThermalFeatures(thermalRows, thermalIndex):
     features["total_foreground_pixels"] = float(currentFrame["total_foreground_pixels"])
     features["max_z"] = float(currentFrame["max_z"])
     features["scene_temperature"] = float(currentFrame["scene_temperature"])
+    features.update(currentFrame.get("fd_features", {}))
 
     # Scene-wide summaries don't depend on picking the correct primary blob.
     # Values are computed from the current frame only, with track histories
@@ -501,8 +559,9 @@ def getThermalFeatures(thermalRows, thermalIndex):
 
 # Streaming adapter: the same features and state updates as processThermopile.
 class LiveThermalProcessor:
-    def __init__(self, frame_shape=(24, 32)):
+    def __init__(self, frame_shape=(24, 32), window_seconds=2.0):
         self.pipeline = ThermopilePipeline(frame_shape)
+        self.pipeline.fd_window_seconds = float(window_seconds)
         self.previousTrackPositions = {}
 
     def calibrate(self, frames):
@@ -511,7 +570,7 @@ class LiveThermalProcessor:
 
     def process(self, timestamp, frame):
         frame = np.asarray(frame, dtype=np.float64).reshape(self.pipeline.frame_shape)
-        detections = self.pipeline.process_frame(frame)
+        detections = self.pipeline.process_frame(frame, timestamp)
         flattened = []
         updatedTrackPositions = dict(self.previousTrackPositions)
         for detection in detections:
@@ -538,6 +597,7 @@ class LiveThermalProcessor:
             "primary_track_id": self.pipeline.primary_track_id,
             "max_z": float(np.max(self.pipeline.last_smoothed_z)),
             "scene_temperature": float(self.pipeline.last_scene_temp),
+            "fd_features": dict(self.pipeline.fd_latest),
         }
         return getThermalFeatures([frameRow], 0)
 

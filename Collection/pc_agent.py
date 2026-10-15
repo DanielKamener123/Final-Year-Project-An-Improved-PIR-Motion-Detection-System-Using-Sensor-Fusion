@@ -6,6 +6,7 @@ import socket
 import sys
 import threading
 import time
+import os
 from pathlib import Path
 
 import cv2
@@ -213,7 +214,7 @@ def recordVideo(cameraIndex, videoPath, frameTimesPath, stopEvent, cameraReadyEv
         return
 
     startPcTime = float(videoInfo["start_pc_time"])
-    frameQueue = queue.Queue()
+    frameQueue = queue.Queue(maxsize=120)
 
     with open(frameTimesPath, "w", newline="", buffering=1) as frameTimesFile:
         frameTimesWriter = csv.writer(frameTimesFile)
@@ -251,7 +252,11 @@ def recordVideo(cameraIndex, videoPath, frameTimesPath, stopEvent, cameraReadyEv
                 continue
 
             relativeTime = frameTime - startPcTime
-            frameQueue.put((frameCount, frameTime, relativeTime, frame))
+            try:
+                frameQueue.put((frameCount, frameTime, relativeTime, frame), timeout=1.0)
+            except queue.Full:
+                videoInfo["runtime_warning"] = "Video writer overloaded; frames dropped"
+                continue
             if frameCount == 0:
                 videoInfo["first_frame_pc_time"] = frameTime
                 videoInfo["first_frame_time_s"] = relativeTime
@@ -273,9 +278,11 @@ def receiveLoop(sock, pirWriter, thermalWriter, stopEvent, state):
     while not stopEvent.is_set():
         try:
             chunk = sock.recv(65536)
-        except OSError:
+        except OSError as exc:
+            state["connection_error"] = str(exc)
             break
         if not chunk:
+            state["connection_error"] = "ROCK TCP connection closed"
             break
 
         buffer += chunk.decode("utf-8")
@@ -397,6 +404,7 @@ def main():
         "syncEvent": threading.Event(),
         "clock_offset_s": None,
         "start_pc_time": None,
+        "connection_error": None,
     }
 
     receiveStopEvent = threading.Event()
@@ -458,6 +466,22 @@ def main():
     state["start_pc_time"] = startPcTime
     videoInfo["start_pc_time"] = startPcTime
 
+    # Write calibration/timing information BEFORE acquisition. A later crash
+    # should not leave the already flushed CSVs without their calibration.
+    writeMetadata(metadataPath, {
+        "split": split, "run_name": runName,
+        "pir_baseline_v": readyPayload.get(KEY_PIR_BASELINE),
+        "pir_sample_rate_hz": readyPayload.get(KEY_PIR_SAMPLE_RATE),
+        "thermal_rate_hz": readyPayload.get(KEY_THERMAL_RATE),
+        "thermal_frame_shape": frameShape,
+        "thermal_background": readyPayload.get(KEY_THERMAL_BACKGROUND),
+        "thermal_sigma": readyPayload.get(KEY_THERMAL_SIGMA),
+        "common_start_pc_time": startPcTime,
+        "common_start_rock_time": startRockTime,
+        "rock_to_pc_offset_s": clockOffset,
+        "recording_complete": False,
+        "note": "Provisional metadata; CSV rows already on disk are recoverable",
+    })
     sendCommand(sock, CMD_START_AT, **{KEY_ROCK_START_TIME: startRockTime})
     startConfiguredEvent.set()
 
@@ -473,26 +497,40 @@ def main():
     print(f"Recording {split}/{runName}")
     print("Video, PIR and thermopile now share t = 0 at the scheduled start.")
 
-    while input("Type 'stop' to finish this recording: ").strip().lower() != "stop":
-        pass
-
-    stopPcTime = time.time()
-    sendCommand(sock, CMD_STOP)
-    state["stoppedEvent"].wait(timeout=2.0)
-
-    videoStopEvent.set()
-    videoThread.join()
-
-    receiveStopEvent.set()
+    # Always close and save partial sensor/video files, even after Ctrl+C or TCP loss.
+    stopPcTime = None
     try:
-        sock.shutdown(socket.SHUT_RDWR)
-    except OSError:
-        pass
-    sock.close()
-    receiveThread.join(timeout=2.0)
-
-    pirFile.close()
-    thermalFile.close()
+        while True:
+            if not receiveThread.is_alive():
+                print("ROCK connection lost. Saving data already received.")
+                break
+            if not videoThread.is_alive():
+                print("Camera stopped; sensor acquisition is still running.")
+                videoInfo.setdefault("runtime_warning", "Camera stopped during acquisition")
+            if input("Type 'stop' to finish this recording: ").strip().lower() == "stop":
+                break
+    except (KeyboardInterrupt, EOFError):
+        print("Recording interrupted: preserving received data")
+    finally:
+        stopPcTime = time.time()
+        try:
+            sendCommand(sock, CMD_STOP)
+            state["stoppedEvent"].wait(timeout=1.0)
+        except OSError:
+            pass
+        videoStopEvent.set()
+        videoThread.join(timeout=15.0)
+        receiveStopEvent.set()
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        sock.close()
+        receiveThread.join(timeout=2.0)
+        pirFile.flush()
+        thermalFile.flush()
+        pirFile.close()
+        thermalFile.close()
 
     recordingStatus = state.get("recording_status") or readyPayload
     frameCount = int(videoInfo.get("frame_count") or 0)
@@ -523,6 +561,8 @@ def main():
         "pir_rows": state["pir_rows"],
         "thermopile_rows": state["thermal_rows"],
         "video_frame_count": frameCount,
+        "connection_error": state.get("connection_error"),
+        "recording_complete": not bool(state.get("connection_error")) and videoThread.is_alive() is False and not bool(videoInfo.get("error")),
         "first_video_frame_time_s": videoInfo.get("first_frame_time_s"),
         "video_measured_fps": measuredFps,
         "video_file_fps": VIDEO_FILE_FPS,

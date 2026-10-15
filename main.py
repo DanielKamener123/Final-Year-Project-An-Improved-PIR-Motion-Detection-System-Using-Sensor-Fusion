@@ -67,7 +67,7 @@ class RealTimeSystem:
         self.acquisitionQueue = queue.Queue(maxsize=4096)
         self.pirAcquisition = PIRAcquisition(self.acquisitionQueue)
         self.pirProcessor = PIRProcessor(self.acquisitionQueue, windowTime=self.window)
-        self.thermal = LiveThermalProcessor()
+        self.thermal = LiveThermalProcessor(window_seconds=self.window)
         self.stopEvent = threading.Event()
         self.lock = threading.Lock()
         self.latest = {"warmup": "Preparing sensors...", "status": "Starting"}
