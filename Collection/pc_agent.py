@@ -48,6 +48,11 @@ CLOCK_SYNC_PINGS = 10
 # How Long To Wait For Both Systems To Start Recording Data
 START_DELAY_SECONDS = 2.0
 
+# Stop the recording if any stream is silent for this long.
+# 4 Hz thermal: 3 s allows several missed frames before declaring failure.
+SENSOR_STALL_SECONDS = 3.0
+CAMERA_STALL_SECONDS = 4.0
+
 # Sends Commands To The Rock
 def sendCommand(sock, command, **fields):
     sock.sendall((json.dumps({"cmd": command, **fields}) + "\n").encode("utf-8"))
@@ -261,6 +266,7 @@ def recordVideo(cameraIndex, videoPath, frameTimesPath, stopEvent, cameraReadyEv
                 videoInfo["first_frame_pc_time"] = frameTime
                 videoInfo["first_frame_time_s"] = relativeTime
             lastFrameTime = frameTime
+            videoInfo["last_frame_monotonic"] = time.monotonic()
             frameCount += 1
 
         frameQueue.put(None)
@@ -337,6 +343,7 @@ def receiveLoop(sock, pirWriter, thermalWriter, stopEvent, state):
                     ]
                 )
                 state["pir_rows"] += 1
+                state["last_pir_monotonic"] = time.monotonic()
             else:
                 frame = payload.get(KEY_FRAME, [])
                 thermalWriter.writerow(
@@ -349,6 +356,7 @@ def receiveLoop(sock, pirWriter, thermalWriter, stopEvent, state):
                     ]
                 )
                 state["thermal_rows"] += 1
+                state["last_thermal_monotonic"] = time.monotonic()
 
 
 def writeMetadata(path, payload):
@@ -405,6 +413,8 @@ def main():
         "clock_offset_s": None,
         "start_pc_time": None,
         "connection_error": None,
+        "last_pir_monotonic": None,
+        "last_thermal_monotonic": None,
     }
 
     receiveStopEvent = threading.Event()
@@ -497,22 +507,56 @@ def main():
     print(f"Recording {split}/{runName}")
     print("Video, PIR and thermopile now share t = 0 at the scheduled start.")
 
-    # Always close and save partial sensor/video files, even after Ctrl+C or TCP loss.
+    # Read terminal input in a separate thread so missing sensor/camera data
+    # can stop recording even while the user is not typing anything.
+    manualStopEvent = threading.Event()
+
+    def waitForManualStop():
+        try:
+            while not manualStopEvent.is_set():
+                if input("Type 'stop' to finish this recording: ").strip().lower() == "stop":
+                    manualStopEvent.set()
+                    return
+        except (EOFError, OSError):
+            manualStopEvent.set()
+
+    threading.Thread(target=waitForManualStop, daemon=True).start()
+
+    # The initial grace period prevents false alarms before the first packet.
+    recordingStartMonotonic = time.monotonic()
+    stopReason = "manual_stop"
     stopPcTime = None
     try:
         while True:
+            now = time.monotonic()
+            if manualStopEvent.is_set():
+                break
             if not receiveThread.is_alive():
-                print("ROCK connection lost. Saving data already received.")
+                stopReason = state.get("connection_error") or "ROCK connection lost"
                 break
             if not videoThread.is_alive():
-                print("Camera stopped; sensor acquisition is still running.")
-                videoInfo.setdefault("runtime_warning", "Camera stopped during acquisition")
-            if input("Type 'stop' to finish this recording: ").strip().lower() == "stop":
+                stopReason = videoInfo.get("error") or videoInfo.get("runtime_warning") or "Camera stopped"
                 break
-    except (KeyboardInterrupt, EOFError):
-        print("Recording interrupted: preserving received data")
+
+            streams = (
+                ("PIR", state.get("last_pir_monotonic"), SENSOR_STALL_SECONDS),
+                ("Thermopile", state.get("last_thermal_monotonic"), SENSOR_STALL_SECONDS),
+                ("Camera", videoInfo.get("last_frame_monotonic"), CAMERA_STALL_SECONDS),
+            )
+            for name, lastSeen, timeout in streams:
+                reference = lastSeen if lastSeen is not None else recordingStartMonotonic
+                if now - reference > timeout:
+                    stopReason = f"{name} stopped responding for over {timeout:g} seconds"
+                    break
+            if stopReason != "manual_stop":
+                break
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        stopReason = "keyboard_interrupt"
     finally:
+        print(f"Stopping recording: {stopReason}. Saving received data.", flush=True)
         stopPcTime = time.time()
+        manualStopEvent.set()
         try:
             sendCommand(sock, CMD_STOP)
             state["stoppedEvent"].wait(timeout=1.0)
@@ -562,7 +606,8 @@ def main():
         "thermopile_rows": state["thermal_rows"],
         "video_frame_count": frameCount,
         "connection_error": state.get("connection_error"),
-        "recording_complete": not bool(state.get("connection_error")) and videoThread.is_alive() is False and not bool(videoInfo.get("error")),
+        "stop_reason": stopReason,
+        "recording_complete": stopReason == "manual_stop" and not bool(state.get("connection_error")) and not bool(videoInfo.get("error")),
         "first_video_frame_time_s": videoInfo.get("first_frame_time_s"),
         "video_measured_fps": measuredFps,
         "video_file_fps": VIDEO_FILE_FPS,
