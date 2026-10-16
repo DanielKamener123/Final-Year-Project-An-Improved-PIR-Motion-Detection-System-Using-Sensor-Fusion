@@ -15,43 +15,87 @@ from Thermopile.interface import getFrame, REFRESH_RATE_HZ
 from Thermopile.processing import LiveThermalProcessor, getThermalFeatureNames
 from Fusion.realtimeModel import RealtimeModel
 
+class StateLights(ttk.LabelFrame):
+    """Three explicit lights; only the currently reported state is illuminated."""
+    COLORS = ("#2ecc71", "#f1c40f", "#e74c3c")
+    LABELS = ("CLEAR", "POSSIBLE", "INTRUDER")
+
+    def __init__(self, parent, title):
+        super().__init__(parent, text=title, padding=12)
+        self.canvas = tk.Canvas(self, height=100, bg="#202630", highlightthickness=0)
+        self.canvas.pack(fill="x", expand=True)
+        self.lamps = []
+        for i, (color, label) in enumerate(zip(self.COLORS, self.LABELS)):
+            x = 50 + 110 * i
+            lamp = self.canvas.create_oval(x - 17, 12, x + 17, 46,
+                                           fill="#3b414b", outline="#87909c", width=2)
+            self.canvas.create_text(x, 67, text=label, fill="#f2f3f5",
+                                    font=("Arial", 9, "bold"))
+            self.lamps.append(lamp)
+        self.status = ttk.Label(self, text="Waiting for sensors", anchor="center")
+        self.status.pack(fill="x", pady=(6, 0))
+
+    def set_state(self, state):
+        if state == "NO INTRUDER":
+            selected = 0
+        elif state == "MAYBE INTRUDER":
+            selected = 1
+        elif state == "INTRUDER":
+            selected = 2
+        else:
+            selected = None
+        for i, lamp in enumerate(self.lamps):
+            self.canvas.itemconfigure(lamp, fill=self.COLORS[i] if i == selected else "#3b414b")
+        self.status.configure(text="Sensor unavailable / warming up" if selected is None
+                              else "Live decision")
+
+
 class LiveGUI:
     def __init__(self, root, snapshot, shutdown):
         self.root = root
         self.snapshot = snapshot
         self.shutdown = shutdown
-        root.title("PIR + Thermopile Intrusion Detection")
-        root.geometry("580x310")
-        root.minsize(520, 280)
+        root.title("Outdoor Intrusion Detection — PIR and Fusion")
+        root.geometry("780x345")
+        root.minsize(735, 320)
         root.protocol("WM_DELETE_WINDOW", self.close)
+
         self.warm = tk.StringVar(value="Starting sensors...")
-        self.pir = tk.StringVar(value="WARMING UP")
-        self.fusion = tk.StringVar(value="WARMING UP")
         self.confidence = tk.StringVar(value="--")
+        self.pir_voltage = tk.StringVar(value="--")
         self.health = tk.StringVar(value="Initialising")
+
         panel = ttk.Frame(root, padding=18)
         panel.pack(fill="both", expand=True)
-        ttk.Label(panel, text="INTRUSION DETECTION SYSTEM", font=("Arial", 16, "bold")).pack(anchor="w")
-        ttk.Label(panel, textvariable=self.warm, font=("Arial", 12)).pack(anchor="w", pady=(8, 12))
+        ttk.Label(panel, text="OUTDOOR INTRUSION DETECTION", font=("Arial", 17, "bold")).pack(anchor="w")
+        ttk.Label(panel, textvariable=self.warm).pack(anchor="w", pady=(5, 10))
+
         cards = ttk.Frame(panel)
-        cards.pack(fill="x")
-        for title, var in (("PIR THRESHOLD", self.pir), ("FUSED STATE", self.fusion)):
-            card = ttk.LabelFrame(cards, text=title, padding=14)
-            card.pack(side="left", fill="x", expand=True, padx=(0, 8))
-            ttk.Label(card, textvariable=var, font=("Arial", 14, "bold")).pack()
-        ttk.Label(panel, text="Fusion human probability", font=("Arial", 10)).pack(anchor="w", pady=(14, 0))
-        ttk.Label(panel, textvariable=self.confidence, font=("Arial", 14, "bold")).pack(anchor="w")
-        ttk.Separator(panel).pack(fill="x", pady=10)
+        cards.pack(fill="x", expand=True)
+        self.pir_lights = StateLights(cards, "PIR ONLY — voltage threshold")
+        self.pir_lights.pack(side="left", fill="both", expand=True, padx=(0, 7))
+        self.fused_lights = StateLights(cards, "FUSED — PIR + THERMOPILE")
+        self.fused_lights.pack(side="left", fill="both", expand=True, padx=(7, 0))
+
+        metrics = ttk.Frame(panel)
+        metrics.pack(fill="x", pady=(13, 7))
+        ttk.Label(metrics, text="PIR relative voltage:").pack(side="left")
+        ttk.Label(metrics, textvariable=self.pir_voltage, font=("Arial", 11, "bold")).pack(side="left", padx=(6, 28))
+        ttk.Label(metrics, text="Fusion human probability:").pack(side="left")
+        ttk.Label(metrics, textvariable=self.confidence, font=("Arial", 11, "bold")).pack(side="left", padx=(6, 0))
+        ttk.Separator(panel).pack(fill="x", pady=6)
         ttk.Label(panel, textvariable=self.health).pack(anchor="w")
         self.refresh()
 
     def refresh(self):
         item = self.snapshot()
         self.warm.set(item.get("warmup", ""))
-        self.pir.set(item.get("pir_state", "WARMING UP"))
-        self.fusion.set(item.get("fusion_state", "WARMING UP"))
+        self.pir_lights.set_state(item.get("pir_state", "WARMING UP"))
+        self.fused_lights.set_state(item.get("fusion_state", "WARMING UP"))
         score = item.get("fusion_confidence")
         self.confidence.set("--" if score is None else f"{score:.1%}")
+        voltage = item.get("pir_relative_voltage")
+        self.pir_voltage.set("--" if voltage is None else f"{voltage:+.3f} V")
         self.health.set(item.get("status", ""))
         self.root.after(250, self.refresh)
 
@@ -119,7 +163,7 @@ class RealTimeSystem:
         # Require a fresh full PIR window after both calibrations are finished.
         ready_at = time.time() + self.window
         self.publish(warmup="Thermopile and PIR calibrated; filling PIR history...",
-                     status="Waiting for complete 1.5-second PIR window")
+                     status=f"Waiting for complete {self.window:g}-second PIR window")
         while not self.stopEvent.is_set():
             frame = getFrame()
             timestamp = time.time()  # Timestamp immediately after a complete sensor read.
