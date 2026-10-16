@@ -93,6 +93,24 @@ def format_compact_results(results_df, run_name):
     for _, record in results_df.iterrows():
         lines.append(join_cells([format_cell(record.get(key, float("nan")), ew[i], model=key == "Algorithm")
                                  for i, (key, _) in enumerate(event_columns)]))
+    # Fair PIR-only ML / thermal-only ML / BVD vs FD ablation in the saved report.
+    extra = ["", "FEATURE-ABLATION COMPARISON (SAME ML MODEL PER ROW)",
+             "Pfa is the application-specific interval measure; thresholds are provisional."]
+    for name in ("PIR ML", "Thermal ML", "PIR + BVD", "PIR + BVD + FD"):
+        metric = f"{name} False Alarm Probability (%)"
+        if metric not in results_df.columns:
+            continue
+        extra.append(f"\n{name}:")
+        extra.append("Win | Model | Acc % | Pd % | Pfa % | Event Pd % | Fresh Pd %")
+        for _, row in results_df.iterrows():
+            def fmt(key):
+                v = row.get(f"{name} {key}", float("nan"))
+                return "N/A" if pd.isna(v) else f"{v:.2f}"
+            extra.append(f"{row['History Window (s)']:.2f} | {row['Algorithm']} | "
+                         f"{fmt('Accuracy (%)')} | {fmt('Probability of Detection (%)')} | "
+                         f"{fmt('False Alarm Probability (%)')} | {fmt('Event Pd (%)')} | "
+                         f"{fmt('Ward Fresh Event Pd (%)')}")
+    lines.extend(extra)
     return "\n".join(lines) + "\n"
 
 

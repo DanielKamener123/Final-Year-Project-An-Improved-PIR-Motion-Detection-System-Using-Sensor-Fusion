@@ -1,0 +1,108 @@
+OFFLINE VALIDATION: New_Cefim_Data
+Win     | Model                   | PIR ePd | Fuse ePd | Conf ePd | PIR Pfa | PIR false # | Fuse false # | Fuse Pfa | Conf Pfa | Pfa drop | Fuse Acc | Acc gain
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+   1.00 | Logistic Regression     |   96.43 |    98.81 |    95.24 |   23.65 |      243.00 |        93.00 |    41.21 |    11.86 |   -74.24 |    65.55 |    -2.91
+   1.00 | Linear SVM              |   96.43 |    97.62 |    91.67 |   23.65 |      243.00 |        97.00 |    13.16 |     8.01 |    44.35 |    75.02 |    11.11
+   1.00 | RBF SVM                 |   96.43 |    97.62 |    97.62 |   23.65 |      243.00 |       119.00 |    16.19 |    11.69 |    31.54 |    78.47 |    16.23
+   1.00 | Random Forest           |   96.43 |    97.62 |    91.67 |   23.65 |      243.00 |        77.00 |     7.49 |     1.07 |    68.32 |    79.83 |    18.25
+   1.00 | Extra Trees             |   96.43 |    97.62 |    91.67 |   23.65 |      243.00 |        66.00 |     7.79 |     1.40 |    67.08 |    78.74 |    16.63
+   1.00 | Gradient Boosting       |   96.43 |   100.00 |    98.81 |   23.65 |      243.00 |        98.00 |    26.22 |     3.88 |   -10.88 |    76.91 |    13.91
+   1.50 | Logistic Regression     |   96.43 |    98.81 |    96.43 |   23.71 |      243.00 |        99.00 |    41.44 |    11.76 |   -74.79 |    65.14 |    -3.45
+   1.50 | Linear SVM              |   96.43 |    97.62 |    94.05 |   23.71 |      243.00 |       102.00 |    13.19 |     7.38 |    44.35 |    74.68 |    10.68
+   1.50 | RBF SVM                 |   96.43 |    97.62 |    96.43 |   23.71 |      243.00 |       103.00 |    14.66 |    10.61 |    38.15 |    78.78 |    16.75
+   1.50 | Random Forest           |   96.43 |    97.62 |    91.67 |   23.71 |      243.00 |        72.00 |     7.51 |     1.40 |    68.32 |    80.11 |    18.72
+   1.50 | Extra Trees             |   96.43 |    97.62 |    89.29 |   23.71 |      243.00 |        65.00 |     7.94 |     1.34 |    66.53 |    79.36 |    17.62
+   1.50 | Gradient Boosting       |   96.43 |    98.81 |    95.24 |   23.71 |      243.00 |        83.00 |    12.74 |     6.30 |    46.28 |    79.30 |    17.53
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+ePd: event detection with MAYBE or INTRUDER; Pfa is per fusion interval, not events per hour.
+False # counts runs of false-active fusion intervals; not full-rate PIR event counts.
+Confirmed-event detection and confirmed-Pfa use INTRUDER alone.
+Thresholds are provisional and must be tuned on validation recordings.
+
+Targets: relative accuracy gain >= 20%; Pfa reduction >= 50%.
+No configuration meets both relative targets.
+
+WARD-STYLE EVENT QUALITY (FUSION, MAYBE OR INTRUDER)
+C=correct 1:1; D=missed; F=fragmented; M=merged; FM=both; I=inserted false alert.
+Pre=events already in alert immediately before entry.
+Fresh Pd counts a new OFF->ON alert within 10s; left-censored entries excluded.
+Counts are independent per recording. These are overlap-based diagnostics;
+not an exact implementation of every 2SET frame subcategory.
+Win     | Model                   | C       | D       | F       | M       | FM      | I       | Pre     | Fresh Pd | Delay s
+----------------------------------------------------------------------------------------------------------------------------
+   1.00 | Logistic Regression     |   28.00 |    0.00 |    8.00 |   47.00 |    2.00 |   14.00 |   64.00 |    22.62 |    0.62
+   1.00 | Linear SVM              |   35.00 |    0.00 |   11.00 |   32.00 |    7.00 |   13.00 |   54.00 |    33.33 |    0.98
+   1.00 | RBF SVM                 |   37.00 |    1.00 |   19.00 |   21.00 |    7.00 |   42.00 |   46.00 |    42.86 |    0.76
+   1.00 | Random Forest           |   48.00 |    0.00 |   20.00 |   10.00 |    7.00 |   41.00 |   27.00 |    65.48 |    0.84
+   1.00 | Extra Trees             |   47.00 |    1.00 |   13.00 |   18.00 |    6.00 |   22.00 |   33.00 |    58.33 |    0.88
+   1.00 | Gradient Boosting       |   47.00 |    0.00 |   17.00 |   18.00 |    3.00 |   40.00 |   34.00 |    59.52 |    0.89
+   1.50 | Logistic Regression     |   23.00 |    0.00 |    9.00 |   51.00 |    2.00 |    9.00 |   66.00 |    20.24 |    0.66
+   1.50 | Linear SVM              |   35.00 |    0.00 |   12.00 |   31.00 |    7.00 |   10.00 |   54.00 |    33.33 |    1.06
+   1.50 | RBF SVM                 |   47.00 |    1.00 |   16.00 |   13.00 |    8.00 |   34.00 |   42.00 |    47.62 |    0.76
+   1.50 | Random Forest           |   50.00 |    1.00 |   18.00 |    8.00 |    8.00 |   38.00 |   27.00 |    65.48 |    0.83
+   1.50 | Extra Trees             |   51.00 |    1.00 |   12.00 |   14.00 |    7.00 |   26.00 |   34.00 |    57.14 |    0.83
+   1.50 | Gradient Boosting       |   50.00 |    0.00 |   18.00 |   12.00 |    5.00 |   32.00 |   29.00 |    64.29 |    0.96
+
+FEATURE-ABLATION COMPARISON (SAME ML MODEL PER ROW)
+Pfa is the application-specific interval measure; thresholds are provisional.
+
+PIR ML:
+Win | Model | Acc % | Pd % | Pfa % | Event Pd % | Fresh Pd %
+1.00 | Logistic Regression | 67.66 | 53.62 | 14.53 | 95.24 | 38.10
+1.00 | Linear SVM | 67.02 | 48.40 | 6.87 | 94.05 | 47.62
+1.00 | RBF SVM | 67.70 | 59.74 | 9.61 | 96.43 | 21.43
+1.00 | Random Forest | 67.02 | 58.63 | 14.53 | 98.81 | 27.38
+1.00 | Extra Trees | 67.77 | 60.93 | 16.19 | 96.43 | 22.62
+1.00 | Gradient Boosting | 67.48 | 58.63 | 10.42 | 96.43 | 21.43
+1.50 | Logistic Regression | 67.35 | 55.22 | 15.48 | 95.24 | 44.05
+1.50 | Linear SVM | 66.91 | 50.37 | 8.16 | 94.05 | 55.95
+1.50 | RBF SVM | 67.58 | 61.92 | 10.94 | 96.43 | 17.86
+1.50 | Random Forest | 68.11 | 60.86 | 13.88 | 97.62 | 36.90
+1.50 | Extra Trees | 68.06 | 63.65 | 15.58 | 96.43 | 23.81
+1.50 | Gradient Boosting | 67.36 | 60.69 | 11.50 | 96.43 | 23.81
+
+Thermal ML:
+Win | Model | Acc % | Pd % | Pfa % | Event Pd % | Fresh Pd %
+1.00 | Logistic Regression | 65.06 | 87.06 | 41.43 | 97.62 | 27.38
+1.00 | Linear SVM | 65.41 | 83.81 | 35.80 | 97.62 | 38.10
+1.00 | RBF SVM | 69.24 | 84.47 | 38.63 | 98.81 | 54.76
+1.00 | Random Forest | 77.51 | 74.08 | 12.25 | 98.81 | 67.86
+1.00 | Extra Trees | 71.64 | 83.85 | 27.39 | 96.43 | 53.57
+1.00 | Gradient Boosting | 70.62 | 90.39 | 37.17 | 100.00 | 57.14
+1.50 | Logistic Regression | 65.02 | 87.05 | 40.95 | 97.62 | 28.57
+1.50 | Linear SVM | 65.34 | 82.20 | 34.42 | 97.62 | 38.10
+1.50 | RBF SVM | 69.20 | 84.17 | 38.67 | 98.81 | 54.76
+1.50 | Random Forest | 77.74 | 71.88 | 11.27 | 98.81 | 70.24
+1.50 | Extra Trees | 73.66 | 80.92 | 21.39 | 96.43 | 57.14
+1.50 | Gradient Boosting | 71.81 | 90.34 | 34.42 | 100.00 | 53.57
+
+PIR + BVD:
+Win | Model | Acc % | Pd % | Pfa % | Event Pd % | Fresh Pd %
+1.00 | Logistic Regression | 65.68 | 88.04 | 41.17 | 98.81 | 20.24
+1.00 | Linear SVM | 74.87 | 74.40 | 13.91 | 97.62 | 32.14
+1.00 | RBF SVM | 78.18 | 80.36 | 16.42 | 98.81 | 47.62
+1.00 | Random Forest | 76.62 | 80.32 | 17.82 | 98.81 | 64.29
+1.00 | Extra Trees | 77.94 | 79.33 | 11.14 | 97.62 | 47.62
+1.00 | Gradient Boosting | 72.71 | 88.41 | 32.74 | 100.00 | 53.57
+1.50 | Logistic Regression | 65.14 | 88.16 | 42.03 | 98.81 | 19.05
+1.50 | Linear SVM | 74.37 | 74.42 | 14.86 | 97.62 | 32.14
+1.50 | RBF SVM | 78.59 | 80.84 | 16.13 | 98.81 | 47.62
+1.50 | Random Forest | 76.57 | 78.70 | 17.28 | 98.81 | 66.67
+1.50 | Extra Trees | 78.78 | 81.29 | 13.46 | 97.62 | 52.38
+1.50 | Gradient Boosting | 79.96 | 83.92 | 18.39 | 98.81 | 59.52
+
+PIR + BVD + FD:
+Win | Model | Acc % | Pd % | Pfa % | Event Pd % | Fresh Pd %
+1.00 | Logistic Regression | 65.55 | 87.55 | 41.21 | 98.81 | 22.62
+1.00 | Linear SVM | 75.02 | 73.58 | 13.16 | 97.62 | 33.33
+1.00 | RBF SVM | 78.47 | 80.90 | 16.19 | 97.62 | 42.86
+1.00 | Random Forest | 79.83 | 73.21 | 7.49 | 97.62 | 65.48
+1.00 | Extra Trees | 78.74 | 75.06 | 7.79 | 97.62 | 58.33
+1.00 | Gradient Boosting | 76.91 | 89.44 | 26.22 | 100.00 | 59.52
+1.50 | Logistic Regression | 65.14 | 87.71 | 41.44 | 98.81 | 20.24
+1.50 | Linear SVM | 74.68 | 73.64 | 13.19 | 97.62 | 33.33
+1.50 | RBF SVM | 78.78 | 78.78 | 14.66 | 97.62 | 47.62
+1.50 | Random Forest | 80.11 | 72.62 | 7.51 | 97.62 | 65.48
+1.50 | Extra Trees | 79.36 | 76.15 | 7.94 | 97.62 | 57.14
+1.50 | Gradient Boosting | 79.30 | 75.82 | 12.74 | 98.81 | 64.29

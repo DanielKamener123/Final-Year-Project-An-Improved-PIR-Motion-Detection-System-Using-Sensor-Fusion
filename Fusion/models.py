@@ -14,6 +14,7 @@ from sklearn.svm import SVC
 from sklearn.ensemble import (
     RandomForestClassifier,
     GradientBoostingClassifier,
+    ExtraTreesClassifier,
 )
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.neighbors import KNeighborsClassifier
@@ -46,28 +47,40 @@ treePreprocessing = [
 # A fresh model set is created every time this function is called.
 # This keeps the feature-fusion and PIR-only systems independent.
 def buildModels():
+    """Small, interpretable baselines plus nonlinear feature classifiers.
+
+    All models support predict_proba for the existing three-state alarm.
+    Preprocessing is fitted only on the training recordings.
+    """
     return {
-        #"Logistic Regression": make_pipeline(
-        #    *scaledFeatureVector,
-        #    LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
-        #),
-        #"Linear SVM": make_pipeline(
-        #    *scaledFeatureVector,
-        #    SVC(kernel="linear", probability=True, random_state=RANDOM_STATE),
-        #),
+        "Logistic Regression": make_pipeline(
+            *scaledFeatureVector,
+            LogisticRegression(max_iter=2000, class_weight="balanced", random_state=RANDOM_STATE),
+        ),
+        "Linear SVM": make_pipeline(
+            *scaledFeatureVector,
+            SVC(kernel="linear", probability=True, class_weight="balanced", random_state=RANDOM_STATE),
+        ),
         "RBF SVM": make_pipeline(
             *scaledFeatureVector,
-            SVC(kernel="rbf", probability=True, random_state=RANDOM_STATE),
+            SVC(kernel="rbf", probability=True, class_weight="balanced", random_state=RANDOM_STATE),
         ),
         "Random Forest": make_pipeline(
             *treePreprocessing,
-            RandomForestClassifier(
-                n_estimators=100,
-                random_state=RANDOM_STATE,
-                n_jobs=-1,
-            ),
+            RandomForestClassifier(n_estimators=200, min_samples_leaf=2,
+                                   class_weight="balanced_subsample", random_state=RANDOM_STATE,
+                                   n_jobs=-1),
         ),
-
+        "Extra Trees": make_pipeline(
+            *treePreprocessing,
+            ExtraTreesClassifier(n_estimators=200, min_samples_leaf=2,
+                                 class_weight="balanced", random_state=RANDOM_STATE,
+                                 n_jobs=-1),
+        ),
+        "Gradient Boosting": make_pipeline(
+            *treePreprocessing,
+            GradientBoostingClassifier(n_estimators=100, random_state=RANDOM_STATE),
+        ),
     }
 
 
@@ -212,10 +225,10 @@ def calculateEventMetrics(eval_data, predictions, maxDelaySeconds=10.0, consecut
 
 # Initial operating points; tune ONLY on the validation recordings.
 # Model confidence is the class-1 predict_proba output, not a hard prediction.
-MAYBE_ENTER = 0.60  
+MAYBE_ENTER = 0.58  
 MAYBE_EXIT = 0.45   
-INTRUDER_ENTER = 0.80
-INTRUDER_EXIT = 0.70
+INTRUDER_ENTER = 0.60
+INTRUDER_EXIT = 0.59
 
 NO_INTRUDER, MAYBE_INTRUDER, INTRUDER = 0, 1, 2
 
@@ -438,19 +451,41 @@ def runModels(train_data, test_data, outputPath=None):
     if not thermalFeatures:
         raise ValueError("No thermopile feature columns were found in the dataset.")
 
+    # Fair ablation: compare identical ML algorithms on identical recordings.
+    # Prefixes originate in Fusion/dataset.py (thermal* and pir*).
+    fdFeatures = [name for name in thermalFeatures if "fd_" in name.lower() or
+                  "framediff" in name.lower() or "frame_diff" in name.lower()]
+    bvdFeatures = [name for name in thermalFeatures if name not in fdFeatures]
+    featureSets = {
+        "PIR ML": pirFeatures,
+        "Thermal ML": thermalFeatures,
+        "PIR + BVD": pirFeatures + bvdFeatures,
+        "PIR + BVD + FD": fusedFeatures,
+    }
+    # If there are no actual FD columns, do not claim an FD comparison occurred.
+    if not fdFeatures:
+        featureSets.pop("PIR + BVD")
+        print("WARNING: No frame-difference columns found; BVD-vs-FD ablation unavailable.")
     print("\n" + "#" * 70)
-    print("FEATURE-FUSION SYSTEM")
-    print(
-        f"Features used: {len(fusedFeatures)} "
-        f"({len(pirFeatures)} PIR + {len(thermalFeatures)} thermopile)"
-    )
+    print("FAIR FEATURE ABLATION (SAME ML MODELS AND TEST RECORDINGS)")
+    print(f"PIR={len(pirFeatures)}, thermal={len(thermalFeatures)}, "
+          f"BVD={len(bvdFeatures)}, FD={len(fdFeatures)}")
     print("#" * 70)
-    fusedResults = runDetectionSystem(
-        train_data,
-        test_data,
-        fusedFeatures,
-        "Feature Fusion",
-    )
+    systemResults = {
+        name: runDetectionSystem(train_data, test_data, columns, name)
+        for name, columns in featureSets.items()
+    }
+    fusedResults = systemResults["PIR + BVD + FD"]
+
+    print("\nMODEL ABLATION SUMMARY (MAYBE+INTRUDER; UNCHANGED ALARM THRESHOLDS)")
+    for algorithm in buildModels():
+        print(f"\n{algorithm}:")
+        for systemName, systemMetrics in systemResults.items():
+            m = systemMetrics[algorithm]
+            print(f"  {systemName:18s} | Acc {m['Accuracy (%)']:6.2f}% "
+                  f"| Pd {m['Probability of Detection (%)']:6.2f}% "
+                  f"| Pfa {m['False Alarm Probability (%)']:6.2f}% "
+                  f"| Event Pd {m['Event Pd (%)']:6.2f}%")
 
     # True thresholded PIR baseline: mark a fusion-time interval active if
     # ANY raw PIR sample crossed threshold since the preceding thermal frame.
@@ -483,6 +518,16 @@ def runModels(train_data, test_data, outputPath=None):
 
         comparisonRows.append({
             "Algorithm": algorithm,
+            **{
+                f"{systemName} {metricName}": systemResults[systemName][algorithm][metricName]
+                for systemName in systemResults
+                for metricName in (
+                    "Accuracy (%)", "Probability of Detection (%)",
+                    "False Alarm Probability (%)", "Event Pd (%)",
+                    "Confirmed Event Pd (%)", "False Alert Episodes",
+                    "Ward Fresh Event Pd (%)", "Ward Fresh Event Delay (s)",
+                )
+            },
             "Fused Probability of Detection (%)": fusedPd,
             "Fused False Alarm Probability (%)": fusedFa,
             "PIR-Only Probability of Detection (%)": pirPd,
@@ -542,7 +587,10 @@ def runModels(train_data, test_data, outputPath=None):
             lambda value: "N/A" if pd.isna(value) else f"{value:.2f}%"
         )
 
-    print(display_df.to_string(index=False))
+    compact = ["Algorithm", "PIR-Only Accuracy (%)", "Fused Accuracy (%)",
+               "Accuracy Improvement (%)", "PIR-Only False Alarm Probability (%)",
+               "Fused False Alarm Probability (%)", "False Alarm Probability Improvement (%)"]
+    print(display_df[compact].to_string(index=False))
 
     # Optional text report when this function is called independently.
     # main.py creates one combined text report for all window lengths.

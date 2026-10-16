@@ -17,7 +17,7 @@ gaussianKernel = np.array([
 filterMode = "reflect"
 
 # Threshold
-threshold = 2.25
+threshold = 2
 
 # Blob extraction - TODO: Remove
 connectivity_8 = True
