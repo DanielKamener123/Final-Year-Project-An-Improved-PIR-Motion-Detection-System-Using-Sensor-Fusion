@@ -22,7 +22,7 @@ def selectDataRate(requestedHz):
 # I2C 2 - PINS 27/28
 i2cBusNumber = 2
 i2cAddress = 0x48
-sampleRateHz = 25
+sampleRateHz = 25 # Change to 32 and remove timing stuff
 
 # PIR Acquisition Is On Its Own Thread
 class PIRAcquisition(threading.Thread):
@@ -56,9 +56,7 @@ class PIRAcquisition(threading.Thread):
             # Get Voltage
             v = self.channel.voltage
 
-            # Timestamp immediately after the ADC value has been read.
-            # This is deliberately simple: the project only needs all recorded
-            # streams aligned closely enough for video labelling and fusion.
+            # Timestamp immediately after the ADC value has been read
             ts = time.time()
 
             # Add (Time, Voltage) To Queue

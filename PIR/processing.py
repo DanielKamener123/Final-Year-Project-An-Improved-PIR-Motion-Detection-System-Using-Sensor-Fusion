@@ -9,8 +9,12 @@ warmupTime = 10
 
 threshold = 0.2
 rollingWindow = 1.5
-historyBuffer = 10
-rawHistoryBuffer = 20
+
+#Baseline corrected Samples
+historyBuffer = 2
+
+# Raw Samples
+rawHistoryBuffer = 10
 
 # Get The Context Features From The Last PIR Samples In History Buffer
 def getHistoryFeatureVector(samples):

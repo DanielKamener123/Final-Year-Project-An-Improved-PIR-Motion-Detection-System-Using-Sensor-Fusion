@@ -436,8 +436,13 @@ def runModels(train_data, test_data, outputPath=None):
     # Outbound labels are used for evaluation only, never feature extraction or fitting.
     test_data = addOutboundEvaluationLabels(test_data)
 
-    pirFeatures = [column for column in train_data.columns if column.startswith("pir") and not column.startswith("pirThresholdInterval")]
-
+    pirFeatures = [
+        column for column in train_data.columns
+        if column.startswith("pir")
+        and not column.startswith("pirThresholdInterval")
+        and column not in ("pirActive", "pirCurrentrelativevoltage")
+    ]
+    
     thermalFeatures = [
         column for column in train_data.columns
         if column.startswith("thermal") and column != "thermal_track_id"
