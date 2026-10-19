@@ -1,5 +1,6 @@
 """NumPy-only Random Forest inference from exported scikit-learn tree parameters."""
 import json
+import time
 from pathlib import Path
 import numpy as np
 from PIR.processing import threshold as PIR_THRESHOLD
@@ -39,11 +40,19 @@ class StateMachine:
         self.maybe_exit = float(thresholds["maybe_exit"])
         self.intruder_enter = float(thresholds["intruder_enter"])
         self.intruder_exit = float(thresholds["intruder_exit"])
+        # Off-delay: INTRUDER only drops after the score has stayed below
+        # intruder_exit for hold_s seconds (0 = original behaviour).
+        self.hold_s = float(thresholds.get("hold_s", 0.0))
         if not 0 <= self.maybe_exit < self.maybe_enter < self.intruder_exit < self.intruder_enter <= 1:
             raise ValueError("Invalid three-state hysteresis thresholds")
+        if self.hold_s < 0:
+            raise ValueError("hold_s must be >= 0")
         self.state = 0
+        self.below_since = None
 
-    def update(self, score):
+    # Same logic as Fusion/alarm_tuning.run_state_machine (used offline)
+    def update(self, score, timestamp=None):
+        now = time.monotonic() if timestamp is None else float(timestamp)
         if self.state == 0:
             if score >= self.intruder_enter:
                 self.state = 2
@@ -54,8 +63,15 @@ class StateMachine:
                 self.state = 2
             elif score < self.maybe_exit:
                 self.state = 0
-        elif score < self.intruder_exit:
-            self.state = 1 if score >= self.maybe_exit else 0
+        else:
+            if score >= self.intruder_exit:
+                self.below_since = None
+            else:
+                if self.below_since is None:
+                    self.below_since = now
+                if now - self.below_since >= self.hold_s:
+                    self.state = 1 if score >= self.maybe_exit else 0
+                    self.below_since = None
         return STATES[self.state]
 
 class RealtimeModel:
@@ -64,7 +80,7 @@ class RealtimeModel:
         self.fusion = RandomForest(fusion_path)
         self.fusion_state = StateMachine(self.fusion.thresholds)
 
-    def predict(self, row):
+    def predict(self, row, timestamp=None):
         voltage = float(row["pirCurrentrelativevoltage"])
         if not np.isfinite(voltage):
             raise ValueError("Invalid PIR relative voltage")
@@ -72,7 +88,7 @@ class RealtimeModel:
         fusion_score = self.fusion.confidence(row)
         return {
             "pir_state": "INTRUDER" if pir_active else "NO INTRUDER",
-            "fusion_state": self.fusion_state.update(fusion_score),
+            "fusion_state": self.fusion_state.update(fusion_score, timestamp),
             "pir_confidence": None,
             "pir_relative_voltage": voltage,
             "pir_threshold": float(PIR_THRESHOLD),

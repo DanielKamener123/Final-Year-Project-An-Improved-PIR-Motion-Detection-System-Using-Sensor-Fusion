@@ -1,0 +1,70 @@
+EVALUATION REPORT: Thermopile_Fixes_19Oct
+Full fused system vs thresholded PIR, trained on training recordings, evaluated on validation.
+Pd: INTRUDER at least once within 10 s of a labelled entry.
+Pfa: MAYBE/INTRUDER with nobody inbound or outbound, or INTRUDER with a person only outbound;
+     percentage of non-human fusion intervals (not alarms per hour).
+Requirements: Pd >= 95%, Pfa <= 5%, accuracy gain >= 20%, false-alarm reduction >= 50%.
+
+REQUIREMENTS - fusion window 1.00 s (validation recordings)
+System               |   Pd % |  Pfa % | Pd impr % | Pfa red % |  Acc % | Acc gain % | Delay s | Pd>=95  Pfa<=5  Acc+20  Pfa-50
+------------------------------------------------------------------------------------------------------------------------------------
+Thresholded PIR      |  96.43 |  23.65 |         - |         - |  67.51 |          - |    0.34 |   PASS    FAIL
+Fused RBF SVM        |  98.81 |  18.99 |      2.47 |     19.70 |  80.76 |      19.62 |    0.32 |   PASS    FAIL    FAIL    FAIL
+Fused Random Forest  | 100.00 |   8.47 |      3.70 |     64.19 |  83.54 |      23.74 |    0.79 |   PASS    FAIL    PASS    PASS
+Events evaluated: 84
+
+WARD-STYLE EVENT QUALITY - fusion window 1.00 s
+C=correct 1:1, D=missed, F=fragmented, M=merged, FM=both, I=inserted false alert.
+Fresh Pd: new OFF->ON alert within 10 s of entry (events already in alert excluded).
+System                             |    C |    D |    F |    M |   FM |    I | Fresh Pd | Delay s | Overfill s | Underfill s
+------------------------------------------------------------------------------------------------------------------------------
+Thresholded PIR                    |   27 |    0 |   41 |    7 |   10 |  133 |    21.43 |    1.38 |      200.0 |       403.5
+Fused RBF SVM (MAYBE/INTR.)        |   36 |    0 |   23 |   11 |   15 |  104 |    47.62 |    0.57 |      149.8 |       138.9
+Fused RBF SVM (INTRUDER)           |   33 |    0 |   34 |    8 |   10 |  125 |    53.57 |    0.56
+Fused Random Forest (MAYBE/INTR.)  |   53 |    0 |   18 |    8 |    6 |   37 |    72.62 |    0.89 |       99.4 |       180.1
+Fused Random Forest (INTRUDER)     |   41 |    0 |   36 |    4 |    4 |   57 |    77.38 |    1.01
+
+PER RECORDING - fusion window 1.00 s
+Detected = INTRUDER within 10 s of entry; FA = false-alarm intervals / non-human intervals
+Recording              | Events | PIR det |      PIR FA |    RBF SVM det |    RBF SVM FA | Random For det | Random For FA
+-------------------------------------------------------------------------------------------------------------------------
+CefimValid1            |      0 |       0 |        0/75 |              0 |          0/75 |              0 |          0/75
+CefimValid7            |     29 |      27 |    261/1231 |             29 |      272/1231 |             29 |       89/1231
+HomeDadValid           |     10 |      10 |      64/241 |             10 |        16/241 |             10 |        12/241
+HomeGardenDadValid     |      7 |       7 |      55/126 |              7 |        45/126 |              7 |        33/126
+HomeGardenMe           |      6 |       6 |      90/321 |              6 |        51/321 |              6 |        14/321
+HomeGardenTam          |      9 |       8 |      74/337 |              8 |        53/337 |              9 |        40/337
+HomeMeTest             |     10 |      10 |      93/272 |             10 |         4/272 |             10 |         5/272
+HomeTamValid           |     13 |      13 |      89/467 |             13 |       142/467 |             13 |        67/467
+
+REQUIREMENTS - fusion window 1.50 s (validation recordings)
+System               |   Pd % |  Pfa % | Pd impr % | Pfa red % |  Acc % | Acc gain % | Delay s | Pd>=95  Pfa<=5  Acc+20  Pfa-50
+------------------------------------------------------------------------------------------------------------------------------------
+Thresholded PIR      |  96.43 |  23.71 |         - |         - |  67.47 |          - |    0.34 |   PASS    FAIL
+Fused RBF SVM        |  98.81 |  17.73 |      2.47 |     25.21 |  81.18 |      20.31 |    0.38 |   PASS    FAIL    PASS    FAIL
+Fused Random Forest  | 100.00 |   8.33 |      3.70 |     64.88 |  83.93 |      24.39 |    0.71 |   PASS    FAIL    PASS    PASS
+Events evaluated: 84
+
+WARD-STYLE EVENT QUALITY - fusion window 1.50 s
+C=correct 1:1, D=missed, F=fragmented, M=merged, FM=both, I=inserted false alert.
+Fresh Pd: new OFF->ON alert within 10 s of entry (events already in alert excluded).
+System                             |    C |    D |    F |    M |   FM |    I | Fresh Pd | Delay s | Overfill s | Underfill s
+------------------------------------------------------------------------------------------------------------------------------
+Thresholded PIR                    |   27 |    0 |   41 |    7 |   10 |  133 |    21.43 |    1.38 |      200.0 |       403.2
+Fused RBF SVM (MAYBE/INTR.)        |   37 |    0 |   27 |   10 |   11 |  102 |    48.81 |    0.58 |      135.0 |       146.6
+Fused RBF SVM (INTRUDER)           |   31 |    0 |   36 |    7 |   11 |  122 |    51.19 |    0.63
+Fused Random Forest (MAYBE/INTR.)  |   51 |    0 |   17 |   10 |    7 |   43 |    66.67 |    0.89 |       99.1 |       176.7
+Fused Random Forest (INTRUDER)     |   35 |    0 |   40 |    4 |    6 |   62 |    76.19 |    0.91
+
+PER RECORDING - fusion window 1.50 s
+Detected = INTRUDER within 10 s of entry; FA = false-alarm intervals / non-human intervals
+Recording              | Events | PIR det |      PIR FA |    RBF SVM det |    RBF SVM FA | Random For det | Random For FA
+-------------------------------------------------------------------------------------------------------------------------
+CefimValid1            |      0 |       0 |        0/73 |              0 |          0/73 |              0 |          0/73
+CefimValid7            |     29 |      27 |    261/1231 |             29 |      245/1231 |             29 |       96/1231
+HomeDadValid           |     10 |      10 |      64/240 |             10 |        16/240 |             10 |        11/240
+HomeGardenDadValid     |      7 |       7 |      55/125 |              7 |        46/125 |              7 |        35/125
+HomeGardenMe           |      6 |       6 |      90/320 |              6 |        44/320 |              6 |        15/320
+HomeGardenTam          |      9 |       8 |      74/336 |              8 |        55/336 |              9 |        32/336
+HomeMeTest             |     10 |      10 |      93/271 |             10 |         4/271 |             10 |         3/271
+HomeTamValid           |     13 |      13 |      89/466 |             13 |       133/466 |             13 |        63/466

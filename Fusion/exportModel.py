@@ -9,6 +9,18 @@ from PIR.processing import getCurrentFeatureNames, getHistoryFeatureNames
 from Thermopile.processing import getThermalFeatureNames
 
 
+def alarm_thresholds(window):
+    """Tuned thresholds from offlineRun.py (tune mode) if available, else defaults."""
+    from Fusion.alarm_tuning import load_thresholds
+    tuned = load_thresholds(window, "Random Forest")
+    if tuned is not None:
+        print(f"Using tuned alarm thresholds for {window:g} s: {tuned}")
+        return tuned
+    print("WARNING: no tuned alarm thresholds found; exporting the default thresholds")
+    return {"maybe_enter": MAYBE_ENTER, "maybe_exit": MAYBE_EXIT,
+            "intruder_enter": INTRUDER_ENTER, "intruder_exit": INTRUDER_EXIT, "hold_s": 0.0}
+
+
 def export_model(model, names, window, destination):
     imputer = model.steps[0][1]
     forest = model.steps[-1][1]
@@ -35,8 +47,7 @@ def export_model(model, names, window, destination):
     data = {
         "features": list(names), "medians": medians.tolist(), "trees": trees,
         "window": float(window),
-        "thresholds": {"maybe_enter": MAYBE_ENTER, "maybe_exit": MAYBE_EXIT,
-                       "intruder_enter": INTRUDER_ENTER, "intruder_exit": INTRUDER_EXIT},
+        "thresholds": alarm_thresholds(window),
     }
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")

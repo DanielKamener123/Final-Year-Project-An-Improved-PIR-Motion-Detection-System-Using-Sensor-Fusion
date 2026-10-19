@@ -4,7 +4,10 @@ import re
 import pandas as pd
 
 from Fusion.dataset import buildDataset
+from Fusion import models as fusionModels
 from Fusion.models import runModels
+from Fusion.report import write_report
+from Fusion.alarm_tuning import save_thresholds, THRESHOLD_FILE
 
 
 # Offline Fusion Configuration
@@ -14,6 +17,7 @@ bufferWindows = [1.0, 1.5]
 # Data Path
 trainingDataset = Path("Datasets/training")
 validationDataset = Path("Datasets/validation")
+testingDataset = Path("Datasets/testing")
 outputPath = Path("Processed")
 
 def format_compact_results(results_df, run_name):
@@ -114,7 +118,10 @@ def format_compact_results(results_df, run_name):
     return "\n".join(lines) + "\n"
 
 
-def main(run_name=None):
+def main(run_name=None, mode="tune"):
+    """mode: "tune"    - evaluate on validation, tune alarm thresholds on it, save them
+             "test"    - evaluate on testing with the saved (frozen) thresholds
+             "default" - evaluate on validation with the original fixed thresholds"""
     if not run_name:
         run_name = input("Name this results file: ").strip()
     if not run_name:
@@ -126,11 +133,15 @@ def main(run_name=None):
         safe_name = safe_name[:-4]
     if not safe_name:
         raise ValueError("Filename cannot be just .txt")
-    output_path = outputPath / f"{safe_name}.txt"
-    if output_path.exists():
-        raise FileExistsError(f"Results file already exists: {output_path}. Choose another name.")
-    print(f"Experiment: {safe_name}")
-    allResults = []
+    # New evaluation report: one folder per run with report.txt and figures
+    output_dir = outputPath / safe_name
+    if output_dir.exists():
+        raise FileExistsError(f"Results folder already exists: {output_dir}. Choose another name.")
+    print(f"Experiment: {safe_name}  (mode: {mode})")
+    runs = []
+    evaluationDataset = testingDataset if mode == "test" else validationDataset
+    fusionModels.ALARM_MODE = {"tune": "tune", "test": "frozen", "default": "default"}[mode]
+    tunedByWindow = {}
 
     for windowSeconds in bufferWindows:
         print(f"\nPIR history: {windowSeconds:.2f}s")
@@ -142,31 +153,51 @@ def main(run_name=None):
         )
         print(f"Training rows: {len(trainData)}")
 
-        print("\nBuilding validation feature dataset from raw recordings...")
+        print(f"\nBuilding evaluation feature dataset from {evaluationDataset} ...")
         validationData = buildDataset(
-            validationDataset,
+            evaluationDataset,
             windowSeconds=windowSeconds,
         )
-        print(f"Validation rows: {len(validationData)}")
+        print(f"Evaluation rows: {len(validationData)}")
 
         print("\nRunning machine-learning algorithms...")
+        fusionModels.ALARM_WINDOW = float(windowSeconds)
         results = runModels(trainData, validationData)
-        results.insert(0, "History Window (s)", float(windowSeconds))
-        allResults.append(results)
+        last = fusionModels.LAST_RUN
+        if mode == "tune":
+            tunedByWindow[float(windowSeconds)] = dict(last["tuning"])
+        runs.append({
+            "window": float(windowSeconds),
+            "results_df": results,
+            "eval_data": last["eval_data"],
+            "pir_states": last["pir_states"],
+            "scores": dict(last["scores"]),
+            "states": dict(last["states"]),
+            "thresholds": dict(last["thresholds"]),
+            "default_metrics": dict(last["default_metrics"]),
+            "tuning": dict(last["tuning"]),
+        })
 
-    if allResults:
-        comparison = pd.concat(allResults, ignore_index=True)
-        outputPath.mkdir(parents=True, exist_ok=True)
-        report = format_compact_results(comparison, safe_name)
-        # Write one simple tabulated text file. Never create a run folder or CSV.
-        with output_path.open("x", encoding="utf-8") as file:
-            file.write(report)
+    if runs:
+        print("\nWriting report and figures...")
+        report = write_report(safe_name, runs, output_dir, mode=mode,
+                              dataset=str(evaluationDataset))
+        if mode == "tune":
+            path = save_thresholds(tunedByWindow)
+            print(f"Saved tuned alarm thresholds to: {path}")
         print("\n" + report)
-        print(f"\nSaved results to: {output_path}")
+        print(f"\nSaved report and figures to: {output_dir}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Offline PIR / thermal feature-fusion validation")
-    parser.add_argument("--name", help="Output filename, e.g. thermal25_no_energy (without .txt)")
+    parser.add_argument("--name", help="Output folder name, e.g. Thermopile_Fixes_19Oct")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--test", action="store_true",
+                       help="Final verification: evaluate on Datasets/testing with the frozen "
+                            f"thresholds in {THRESHOLD_FILE}")
+    group.add_argument("--default-thresholds", action="store_true",
+                       help="Evaluate on validation with the original fixed alarm thresholds")
     args = parser.parse_args()
-    main(run_name=args.name)
+    mode = "test" if args.test else ("default" if args.default_thresholds else "tune")
+    main(run_name=args.name, mode=mode)

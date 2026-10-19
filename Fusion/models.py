@@ -32,6 +32,25 @@ from sklearn.metrics import (
 RANDOM_STATE = 42
 LABEL_COLUMN = "human"
 
+# Development: only run these models to save time. Set to None to run all
+# models (e.g. when producing the full comparison for the report).
+DEV_MODELS = ["RBF SVM", "Random Forest"]
+
+# Evaluation: only the full fused system is compared against the thresholded
+# PIR. Set True to also run the PIR-ML / Thermal-ML / PIR+BVD ablations.
+RUN_ABLATIONS = False
+
+# Filled by runDetectionSystem / runModels so Fusion/report.py can draw figures:
+# LAST_RUN["eval_data"], LAST_RUN["pir_states"],
+# LAST_RUN["scores"][model], LAST_RUN["states"][model] (fused system only)
+LAST_RUN = {"scores": {}, "states": {}, "default_metrics": {}, "thresholds": {}, "tuning": {}}
+
+# Alarm thresholds: "default" = constants below, "tune" = tune on the
+# evaluation (validation) data, "frozen" = load Processed/realtime/alarm_thresholds.json
+ALARM_MODE = "default"
+ALARM_WINDOW = None
+FUSED_SYSTEM = "PIR + BVD + FD"
+
 
 # Preprocessing
 scaledFeatureVector = [
@@ -52,7 +71,7 @@ def buildModels():
     All models support predict_proba for the existing three-state alarm.
     Preprocessing is fitted only on the training recordings.
     """
-    return {
+    models = {
         "Logistic Regression": make_pipeline(
             *scaledFeatureVector,
             LogisticRegression(max_iter=2000, class_weight="balanced", random_state=RANDOM_STATE),
@@ -82,6 +101,9 @@ def buildModels():
             GradientBoostingClassifier(n_estimators=100, random_state=RANDOM_STATE),
         ),
     }
+    if DEV_MODELS is not None:
+        models = {name: model for name, model in models.items() if name in DEV_MODELS}
+    return models
 
 
 def calculateMetrics(y_true, predictions):
@@ -358,6 +380,20 @@ def calculateStateMetrics(eval_data, states):
     }
 
 
+def statesWithThresholds(eval_data, scores, thresholds):
+    """Run the tuned three-state machine (with off-delay) per recording,
+    returning states aligned to eval_data rows."""
+    from Fusion.alarm_tuning import run_state_machine
+    states = np.zeros(len(eval_data), dtype=int)
+    scores = np.asarray(scores, dtype=float)
+    times_all = eval_data["fusionTime"].to_numpy(dtype=float)
+    for _, idx in eval_data.groupby("recording", sort=False).indices.items():
+        idx = np.asarray(idx)
+        idx = idx[np.argsort(times_all[idx], kind="stable")]
+        states[idx] = run_state_machine(scores[idx], times_all[idx], thresholds)
+    return states
+
+
 def runDetectionSystem(train_data, test_data, featureColumns, systemName):
     """Train and evaluate every ML algorithm for one sensor configuration."""
     X_train, X_test = prepareFeatures(
@@ -380,6 +416,29 @@ def runDetectionSystem(train_data, test_data, featureColumns, systemName):
             model.fit(X_train, y_train)
             scores = confidenceScores(model, X_test)
             states = applyThreeState(scores, test_data)
+            if systemName == FUSED_SYSTEM:
+                # Keep default-threshold metrics for the before/after comparison
+                LAST_RUN["default_metrics"][name] = calculateStateMetrics(test_data, states)
+                thresholds = None
+                if ALARM_MODE == "tune":
+                    from Fusion.alarm_tuning import tune
+                    print("Tuning alarm thresholds on the evaluation data...")
+                    tuned = tune(test_data, scores)
+                    LAST_RUN["tuning"][name] = tuned
+                    thresholds = tuned["thresholds"]
+                elif ALARM_MODE == "frozen":
+                    from Fusion.alarm_tuning import load_thresholds
+                    thresholds = load_thresholds(ALARM_WINDOW, name)
+                    if thresholds is None:
+                        raise ValueError(f"No frozen alarm thresholds for {name} at "
+                                         f"{ALARM_WINDOW} s; run offlineRun.py --tune first")
+                if thresholds is not None:
+                    states = statesWithThresholds(test_data, scores, thresholds)
+                LAST_RUN["thresholds"][name] = thresholds or {
+                    "maybe_enter": MAYBE_ENTER, "maybe_exit": MAYBE_EXIT,
+                    "intruder_enter": INTRUDER_ENTER, "intruder_exit": INTRUDER_EXIT, "hold_s": 0.0}
+                LAST_RUN["scores"][name] = scores
+                LAST_RUN["states"][name] = states
             metrics = calculateStateMetrics(test_data, states)
             results[name] = metrics
 
@@ -465,12 +524,20 @@ def runModels(train_data, test_data, outputPath=None):
         "PIR ML": pirFeatures,
         "Thermal ML": thermalFeatures,
         "PIR + BVD": pirFeatures + bvdFeatures,
-        "PIR + BVD + FD": fusedFeatures,
+        FUSED_SYSTEM: fusedFeatures,
     }
     # If there are no actual FD columns, do not claim an FD comparison occurred.
     if not fdFeatures:
         featureSets.pop("PIR + BVD")
         print("WARNING: No frame-difference columns found; BVD-vs-FD ablation unavailable.")
+    if not RUN_ABLATIONS:
+        featureSets = {FUSED_SYSTEM: fusedFeatures}
+    LAST_RUN["scores"] = {}
+    LAST_RUN["states"] = {}
+    LAST_RUN["default_metrics"] = {}
+    LAST_RUN["thresholds"] = {}
+    LAST_RUN["tuning"] = {}
+    LAST_RUN["eval_data"] = test_data
     print("\n" + "#" * 70)
     print("FAIR FEATURE ABLATION (SAME ML MODELS AND TEST RECORDINGS)")
     print(f"PIR={len(pirFeatures)}, thermal={len(thermalFeatures)}, "
@@ -503,6 +570,7 @@ def runModels(train_data, test_data, outputPath=None):
         raise ValueError("Nonbinary PIR interval flags in validation data")
     pir_states = np.where(interval_active == 1, INTRUDER, NO_INTRUDER)
     pir_metrics = calculateStateMetrics(test_data, pir_states)
+    LAST_RUN["pir_states"] = pir_states
     print(f"\nPIR THRESHOLD BASELINE: ANY sample in thermal interval >= {PIR_THRESHOLD:g} V absolute deviation")
     print(f"PIR threshold accuracy: {pir_metrics['Accuracy (%)']:.2f}%")
     print(f"PIR baseline: {np.count_nonzero(interval_active)} active fusion intervals "
@@ -571,6 +639,7 @@ def runModels(train_data, test_data, outputPath=None):
             "Evaluated Events": fused["Events"],
             "PIR-Only Mean Event Delay (s)": pir["Mean Event Delay (s)"],
             "Fused Mean Event Delay (s)": fused["Mean Event Delay (s)"],
+            "Fused Confirmed Mean Event Delay (s)": fused["Confirmed Mean Event Delay (s)"],
             **{f"Fused Ward {key}": fused[f"Ward {key}"] for key in ("C", "D", "F", "M", "FM", "I", "TrueEvents", "PredEvents", "Preexisting", "Eligible", "NewDetected", "Overfill s", "Underfill s", "Fresh Event Pd (%)", "Fresh Event Delay (s)")},
             **{f"PIR-Only Ward {key}": pir[f"Ward {key}"] for key in ("C", "D", "F", "M", "FM", "I", "TrueEvents", "PredEvents", "Preexisting", "Eligible", "NewDetected", "Overfill s", "Underfill s", "Fresh Event Pd (%)", "Fresh Event Delay (s)")},
             **{f"Fused Ward Confirmed {key}": fused[f"Ward Confirmed {key}"] for key in ("C", "D", "F", "M", "FM", "I", "Fresh Event Pd (%)", "Fresh Event Delay (s)")},

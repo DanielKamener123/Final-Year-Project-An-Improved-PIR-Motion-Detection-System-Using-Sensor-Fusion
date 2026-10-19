@@ -1,0 +1,118 @@
+EVALUATION REPORT: New_Thermopile_New_Thresholds
+Full fused system vs thresholded PIR. Trained on Datasets/training, evaluated on Datasets\validation: alarm thresholds TUNED on this data (optimistic).
+Pd: INTRUDER at least once within 10 s of a labelled entry.
+Pfa: MAYBE/INTRUDER with nobody inbound or outbound, or INTRUDER with a person only outbound;
+     percentage of non-human fusion intervals (not alarms per hour).
+Requirements: Pd >= 95%, Pfa <= 5%, accuracy gain >= 20%, false-alarm reduction >= 50%.
+
+ALARM THRESHOLDS - fusion window 1.00 s (mode: tune)
+Model            | maybe enter/exit | intruder enter/exit | off-delay s
+RBF SVM          |    0.790/0.740 |         0.850/0.800 | 0.0
+Random Forest    |    0.575/0.475 |         0.775/0.675 | 0.0
+Default (0.58/0.45, 0.60/0.59) vs tuned thresholds on the SAME validation data.
+Tuned validation numbers are optimistic; the independent result is the --test run.
+Model            | Pd default | Pd tuned | Pfa default | Pfa tuned | target met
+RBF SVM          |      98.81 |    95.24 |       18.99 |      5.83 | Pd only (Pfa > 5% for every setting)
+Random Forest    |     100.00 |    95.24 |        8.47 |      4.95 | Pd and Pfa targets
+
+REQUIREMENTS - fusion window 1.00 s (validation recordings)
+System               |   Pd % |  Pfa % | Pd impr % | Pfa red % |  Acc % | Acc gain % | Delay s | Pd>=95  Pfa<=5  Acc+20  Pfa-50
+------------------------------------------------------------------------------------------------------------------------------------
+Thresholded PIR      |  96.43 |  23.65 |         - |         - |  67.51 |          - |    0.34 |   PASS    FAIL
+Fused RBF SVM        |  95.24 |   5.83 |     -1.23 |     75.34 |  79.51 |      17.76 |    1.47 |   PASS    FAIL    FAIL    PASS
+Fused Random Forest  |  95.24 |   4.95 |     -1.23 |     79.06 |  83.94 |      24.33 |    1.21 |   PASS    PASS    PASS    PASS
+Events evaluated: 84
+
+WARD-STYLE EVENT QUALITY - fusion window 1.00 s
+C=correct 1:1, D=missed, F=fragmented, M=merged, FM=both, I=inserted false alert.
+Fresh Pd: new OFF->ON alert within 10 s of entry (events already in alert excluded).
+System                             |    C |    D |    F |    M |   FM |    I | Fresh Pd | Delay s | Overfill s | Underfill s
+------------------------------------------------------------------------------------------------------------------------------
+Thresholded PIR                    |   27 |    0 |   41 |    7 |   10 |  133 |    21.43 |    1.38 |      200.0 |       403.5
+Fused RBF SVM (MAYBE/INTR.)        |   27 |    0 |   49 |    4 |    5 |   65 |    71.43 |    1.24 |       44.8 |       346.3
+Fused RBF SVM (INTRUDER)           |   21 |    3 |   57 |    1 |    3 |   36 |    82.14 |    1.64
+Fused Random Forest (MAYBE/INTR.)  |   52 |    0 |   21 |    7 |    5 |   49 |    72.62 |    0.84 |       83.9 |       185.2
+Fused Random Forest (INTRUDER)     |   34 |    2 |   43 |    2 |    4 |    4 |    84.52 |    1.35
+
+FALSE-ALARM BREAKDOWN - fusion window 1.00 s
+edge = within 3 s of a labelled person (inbound or outbound): alarm lingering or starting early at an event boundary; isolated = everything else.
+Recording              |                Thresholded PIR |                  Fused RBF SVM |            Fused Random Forest
+----------------------------------------------------------------------------------------------------------------------------
+CefimValid1            |            0 edge    0 iso (-) |            0 edge    0 iso (-) |            0 edge    0 iso (-)
+CefimValid7            |   240 edge   21 iso (92% edge) |    98 edge   14 iso (88% edge) |    44 edge    9 iso (83% edge)
+HomeDadValid           |    58 edge    6 iso (91% edge) |    4 edge    0 iso (100% edge) |    8 edge    0 iso (100% edge)
+HomeGardenDadValid     |    53 edge    2 iso (96% edge) |   20 edge    0 iso (100% edge) |   16 edge    0 iso (100% edge)
+HomeGardenMe           |    52 edge   38 iso (58% edge) |     4 edge    3 iso (57% edge) |     7 edge    1 iso (88% edge)
+HomeGardenTam          |    58 edge   16 iso (78% edge) |     8 edge    4 iso (67% edge) |    13 edge    7 iso (65% edge)
+HomeMeTest             |    91 edge    2 iso (98% edge) |            0 edge    0 iso (-) |    2 edge    0 iso (100% edge)
+HomeTamValid           |    73 edge   16 iso (82% edge) |    16 edge    8 iso (67% edge) |    30 edge   15 iso (67% edge)
+ALL                    |   625 edge  101 iso (86% edge) |   150 edge   29 iso (84% edge) |   120 edge   32 iso (79% edge)
+
+PER RECORDING - fusion window 1.00 s
+Detected = INTRUDER within 10 s of entry; FA = false-alarm intervals / non-human intervals
+Recording              | Events | PIR det |      PIR FA |    RBF SVM det |    RBF SVM FA | Random For det | Random For FA
+-------------------------------------------------------------------------------------------------------------------------
+CefimValid1            |      0 |       0 |        0/75 |              0 |          0/75 |              0 |          0/75
+CefimValid7            |     29 |      27 |    261/1231 |             29 |      112/1231 |             26 |       53/1231
+HomeDadValid           |     10 |      10 |      64/241 |             10 |         4/241 |             10 |         8/241
+HomeGardenDadValid     |      7 |       7 |      55/126 |              7 |        20/126 |              7 |        16/126
+HomeGardenMe           |      6 |       6 |      90/321 |              6 |         7/321 |              6 |         8/321
+HomeGardenTam          |      9 |       8 |      74/337 |              8 |        12/337 |              8 |        20/337
+HomeMeTest             |     10 |      10 |      93/272 |              7 |         0/272 |             10 |         2/272
+HomeTamValid           |     13 |      13 |      89/467 |             13 |        24/467 |             13 |        45/467
+
+ALARM THRESHOLDS - fusion window 1.50 s (mode: tune)
+Model            | maybe enter/exit | intruder enter/exit | off-delay s
+RBF SVM          |    0.790/0.740 |         0.850/0.800 | 0.0
+Random Forest    |    0.550/0.500 |         0.800/0.650 | 0.0
+Default (0.58/0.45, 0.60/0.59) vs tuned thresholds on the SAME validation data.
+Tuned validation numbers are optimistic; the independent result is the --test run.
+Model            | Pd default | Pd tuned | Pfa default | Pfa tuned | target met
+RBF SVM          |      98.81 |    96.43 |       17.73 |      5.39 | Pd only (Pfa > 5% for every setting)
+Random Forest    |     100.00 |    95.24 |        8.33 |      4.80 | Pd and Pfa targets
+
+REQUIREMENTS - fusion window 1.50 s (validation recordings)
+System               |   Pd % |  Pfa % | Pd impr % | Pfa red % |  Acc % | Acc gain % | Delay s | Pd>=95  Pfa<=5  Acc+20  Pfa-50
+------------------------------------------------------------------------------------------------------------------------------------
+Thresholded PIR      |  96.43 |  23.71 |         - |         - |  67.47 |          - |    0.34 |   PASS    FAIL
+Fused RBF SVM        |  96.43 |   5.39 |      0.00 |     77.27 |  79.69 |      18.10 |    1.39 |   PASS    FAIL    FAIL    PASS
+Fused Random Forest  |  95.24 |   4.80 |     -1.23 |     79.75 |  84.13 |      24.68 |    1.34 |   PASS    PASS    PASS    PASS
+Events evaluated: 84
+
+WARD-STYLE EVENT QUALITY - fusion window 1.50 s
+C=correct 1:1, D=missed, F=fragmented, M=merged, FM=both, I=inserted false alert.
+Fresh Pd: new OFF->ON alert within 10 s of entry (events already in alert excluded).
+System                             |    C |    D |    F |    M |   FM |    I | Fresh Pd | Delay s | Overfill s | Underfill s
+------------------------------------------------------------------------------------------------------------------------------
+Thresholded PIR                    |   27 |    0 |   41 |    7 |   10 |  133 |    21.43 |    1.38 |      200.0 |       403.2
+Fused RBF SVM (MAYBE/INTR.)        |   29 |    0 |   47 |    3 |    6 |   58 |    77.38 |    1.23 |       35.6 |       357.2
+Fused RBF SVM (INTRUDER)           |   27 |    2 |   52 |    1 |    3 |   34 |    82.14 |    1.52
+Fused Random Forest (MAYBE/INTR.)  |   44 |    0 |   25 |    8 |    8 |   64 |    64.29 |    0.86 |       85.3 |       177.8
+Fused Random Forest (INTRUDER)     |   43 |    2 |   32 |    3 |    5 |    2 |    88.10 |    1.44
+
+FALSE-ALARM BREAKDOWN - fusion window 1.50 s
+edge = within 3 s of a labelled person (inbound or outbound): alarm lingering or starting early at an event boundary; isolated = everything else.
+Recording              |                Thresholded PIR |                  Fused RBF SVM |            Fused Random Forest
+----------------------------------------------------------------------------------------------------------------------------
+CefimValid1            |            0 edge    0 iso (-) |            0 edge    0 iso (-) |            0 edge    0 iso (-)
+CefimValid7            |   240 edge   21 iso (92% edge) |    83 edge   12 iso (87% edge) |    40 edge   13 iso (75% edge)
+HomeDadValid           |    58 edge    6 iso (91% edge) |    7 edge    0 iso (100% edge) |    6 edge    0 iso (100% edge)
+HomeGardenDadValid     |    53 edge    2 iso (96% edge) |   21 edge    0 iso (100% edge) |   17 edge    0 iso (100% edge)
+HomeGardenMe           |    52 edge   38 iso (58% edge) |     5 edge    3 iso (62% edge) |    6 edge    0 iso (100% edge)
+HomeGardenTam          |    58 edge   16 iso (78% edge) |     6 edge    4 iso (60% edge) |    12 edge    6 iso (67% edge)
+HomeMeTest             |    91 edge    2 iso (98% edge) |            0 edge    0 iso (-) |    1 edge    0 iso (100% edge)
+HomeTamValid           |    73 edge   16 iso (82% edge) |    19 edge    5 iso (79% edge) |    31 edge   15 iso (67% edge)
+ALL                    |   625 edge  101 iso (86% edge) |   141 edge   24 iso (85% edge) |   113 edge   34 iso (77% edge)
+
+PER RECORDING - fusion window 1.50 s
+Detected = INTRUDER within 10 s of entry; FA = false-alarm intervals / non-human intervals
+Recording              | Events | PIR det |      PIR FA |    RBF SVM det |    RBF SVM FA | Random For det | Random For FA
+-------------------------------------------------------------------------------------------------------------------------
+CefimValid1            |      0 |       0 |        0/73 |              0 |          0/73 |              0 |          0/73
+CefimValid7            |     29 |      27 |    261/1231 |             29 |       95/1231 |             26 |       53/1231
+HomeDadValid           |     10 |      10 |      64/240 |             10 |         7/240 |             10 |         6/240
+HomeGardenDadValid     |      7 |       7 |      55/125 |              7 |        21/125 |              7 |        17/125
+HomeGardenMe           |      6 |       6 |      90/320 |              6 |         8/320 |              6 |         6/320
+HomeGardenTam          |      9 |       8 |      74/336 |              8 |        10/336 |              8 |        18/336
+HomeMeTest             |     10 |      10 |      93/271 |              8 |         0/271 |             10 |         1/271
+HomeTamValid           |     13 |      13 |      89/466 |             13 |        24/466 |             13 |        46/466
