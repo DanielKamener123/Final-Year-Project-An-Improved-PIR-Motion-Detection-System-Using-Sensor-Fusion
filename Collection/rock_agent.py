@@ -229,7 +229,6 @@ def main():
             with conn:
                 print("Calibrating sensors - Make Sure No One Is In Frame")
                 thermopile.calibrate()
-                processor.calibrate()
                 print("Calibration complete")
                 sendJson(conn, calibrationData(processor, STATUS_READY), sendLock)
 

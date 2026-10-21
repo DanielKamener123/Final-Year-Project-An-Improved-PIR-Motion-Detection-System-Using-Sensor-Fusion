@@ -80,8 +80,9 @@ class RealtimeModel:
         self.fusion = RandomForest(fusion_path)
         self.fusion_state = StateMachine(self.fusion.thresholds)
 
-    def predict(self, row, timestamp=None):
-        voltage = float(row["pirCurrentrelativevoltage"])
+    def predict(self, row, timestamp=None, pirVoltage=None):
+        # PIR-only baseline uses the newest relative PIR sample (not a model feature)
+        voltage = float(pirVoltage) if pirVoltage is not None else float("nan")
         if not np.isfinite(voltage):
             raise ValueError("Invalid PIR relative voltage")
         pir_active = abs(voltage) >= float(PIR_THRESHOLD)

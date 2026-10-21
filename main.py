@@ -9,8 +9,8 @@ import tkinter as tk
 from tkinter import ttk
 
 from PIR.interface import PIRAcquisition, sampleRateHz
-from PIR.processing import (PIRProcessor, getCurrentFeatureNames, getHistoryFeatureNames,
-                            getCurrentFeatureVector, getHistoryFeatureVector, warmupTime)
+from PIR.processing import (PIRProcessor, getHistoryFeatureNames,
+                            getHistoryFeatureVector, warmupTime)
 from Thermopile.interface import getFrame, REFRESH_RATE_HZ
 from Thermopile.processing import LiveThermalProcessor, getThermalFeatureNames
 from Fusion.realtimeModel import RealtimeModel
@@ -187,13 +187,11 @@ class RealTimeSystem:
                 self.publish(pir_state="UNAVAILABLE", fusion_state="UNAVAILABLE",
                              status="Stale PIR samples")
                 continue
-            current = getCurrentFeatureVector(samples[-1][1])
             history = getHistoryFeatureVector(samples)
             row = {}
-            row.update({f"pir{name.capitalize()}": float(v) for name, v in zip(getCurrentFeatureNames(), current)})
             row.update({f"pir{name.capitalize()}": float(v) for name, v in zip(getHistoryFeatureNames(), history)})
             row.update({f"thermal{name.capitalize()}": float(thermal_features[name]) for name in getThermalFeatureNames()})
-            result = self.model.predict(row, timestamp)
+            result = self.model.predict(row, timestamp, pirVoltage=samples[-1][1])
             elapsed_ms = (time.monotonic() - started) * 1000.0
             self.publish(warmup="READY — both sensors calibrated", **result,
                          status=f"PIR {sampleRateHz} Hz target · Thermal {REFRESH_RATE_HZ:g} Hz target · Processing {elapsed_ms:.1f} ms")

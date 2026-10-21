@@ -13,9 +13,6 @@ rollingWindow = 1.5
 #Baseline corrected Samples
 historyBuffer = 2
 
-# Raw Samples
-rawHistoryBuffer = 10
-
 # Get The Context Features From The Last PIR Samples In History Buffer
 def getHistoryFeatureVector(samples):
     # Check For No Samples
@@ -68,27 +65,6 @@ def getHistoryFeatureNames():
         "peakSeparation",
     ]
 
-# Get Current Features From Current Sample
-def getCurrentFeatureVector(relativeVoltage):
-    if relativeVoltage is None or not np.isfinite(relativeVoltage):
-        return np.zeros(2, dtype=np.float64)
-
-    relativeVoltage = float(relativeVoltage)
-    pir_active = int(abs(relativeVoltage) >= float(threshold))
-
-    return np.array(
-        [pir_active, relativeVoltage],
-        dtype=np.float64,
-    )
-
-
-def getCurrentFeatureNames():
-    return [
-        "active",
-        "currentRelativeVoltage",
-    ]
-
-
 class PIRProcessor:
     def __init__(self, sampleQueue: queue.Queue | None = None, initialBaseline=None, windowTime=rollingWindow):
         if windowTime <= 0:
@@ -111,7 +87,6 @@ class PIRProcessor:
         self.lastError = None
 
         self.history = deque()
-        self.rawHistory = deque()
         self.historyLock = threading.Lock()
         self.stateLock = threading.Lock()
 
@@ -135,27 +110,6 @@ class PIRProcessor:
         if ts - self.warmupStartTime >= warmupTime:
             self.initialised = True
 
-    def calibrate(self, windowTime=warmupTime):
-        with self.historyLock:
-            rawSamples = list(self.rawHistory)
-
-        if not rawSamples:
-            raise RuntimeError("No PIR samples are available for calibration")
-
-        endTime = rawSamples[-1][0]
-        startTime = endTime - float(windowTime)
-        calibrationValues = [value for ts, value in rawSamples if ts >= startTime]
-
-        if not calibrationValues:
-            raise RuntimeError("No PIR samples are available in the calibration window")
-
-        with self.stateLock:
-            self.baselineVoltage = float(np.median(calibrationValues))
-            self.initialised = True
-
-        with self.historyLock:
-            self.history.clear()
-
     def processSample(self, ts, v):
         # Validation - TODO: Can Remove
         ts, v = float(ts), float(v)
@@ -164,12 +118,6 @@ class PIRProcessor:
         if self.lastTime is not None and ts <= self.lastTime:
             raise ValueError("PIR timestamps must be strictly increasing")
         self.lastTime = ts
-
-        with self.historyLock:
-            self.rawHistory.append((ts, v))
-            rawCutoff = ts - rawHistoryBuffer
-            while self.rawHistory and self.rawHistory[0][0] < rawCutoff:
-                self.rawHistory.popleft()
 
         # Make Sure System Is Warmed Up
         if not self.initialised:
@@ -283,5 +231,3 @@ def preprocessPIR(pirData, initialBaseline, windowSeconds):
         relative[index] = processor.processSample(timestamp, voltage)
 
     return timestamps, relative
-
-

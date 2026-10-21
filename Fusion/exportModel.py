@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from Fusion.dataset import buildDataset
 from Fusion.models import (buildModels, MAYBE_ENTER, MAYBE_EXIT, INTRUDER_ENTER, INTRUDER_EXIT)
-from PIR.processing import getCurrentFeatureNames, getHistoryFeatureNames
+from PIR.processing import getHistoryFeatureNames
 from Thermopile.processing import getThermalFeatureNames
 
 
@@ -100,10 +100,9 @@ def main():
     parser.add_argument("--window", type=float, default=1.5)
     args = parser.parse_args()
     data = buildDataset(args.training, args.window)
-    current = ["pir" + n.capitalize() for n in getCurrentFeatureNames()]
     history = ["pir" + n.capitalize() for n in getHistoryFeatureNames()]
     thermal = ["thermal" + n.capitalize() for n in getThermalFeatureNames()]
-    for suffix, features in (("fusion", current + history + thermal),):
+    for suffix, features in (("fusion", history + thermal),):
         missing = [name for name in features if name not in data.columns]
         if missing:
             raise ValueError(f"Missing training features: {missing}")

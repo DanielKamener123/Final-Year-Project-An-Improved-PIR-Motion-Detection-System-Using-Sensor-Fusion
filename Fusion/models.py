@@ -499,7 +499,6 @@ def runModels(train_data, test_data, outputPath=None):
         column for column in train_data.columns
         if column.startswith("pir")
         and not column.startswith("pirThresholdInterval")
-        and column not in ("pirActive", "pirCurrentrelativevoltage")
     ]
     
     thermalFeatures = [

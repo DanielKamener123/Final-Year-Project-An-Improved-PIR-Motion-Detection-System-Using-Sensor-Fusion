@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from PIR.processing import threshold as PIR_THRESHOLD, preprocessPIR, getCurrentFeatureNames, getHistoryFeatureNames, getCurrentFeatureVector, getHistoryFeatureVector
+from PIR.processing import threshold as PIR_THRESHOLD, preprocessPIR, getHistoryFeatureNames, getHistoryFeatureVector
 from Thermopile.processing import processThermopile, getThermalFeatures, getThermalFeatureNames
 
 # Gets Labels CSV File
@@ -14,6 +14,14 @@ def loadLabels(labelPath):
 
     labels = pd.read_csv(labelsPath)
     return labels
+
+# Gets Optional Excluded Intervals (start_s,end_s) For Corrupted Sections Of A Recording
+def loadExcludedIntervals(recordingPath):
+    excludedPath = Path(recordingPath) / "excluded.csv"
+    if not excludedPath.exists():
+        return []
+    excluded = pd.read_csv(excludedPath)
+    return [(float(start), float(end)) for start, end in excluded[["start_s", "end_s"]].itertuples(index=False, name=None)]
 
 # Check If Time Is Within A Labelled Human Interval
 def labelAtTime(labels, videoTime):
@@ -74,13 +82,13 @@ def buildRecordingDataset(recordingPath, windowSeconds):
     endTime = pirTimestamps[-1]
 
     pirHistoryFeatureNames = getHistoryFeatureNames()
-    pirCurrentFeatureNames = getCurrentFeatureNames()
     thermalFeatureNames = getThermalFeatureNames()
     rows = []
 
     # Get Valid Thermopile Timestamps
     validThermalTimestamp = np.flatnonzero((thermalTimestamps >= startTime)& (thermalTimestamps <= endTime))
 
+    excludedIntervals = loadExcludedIntervals(recordingPath)
     previousFusionTimestamp = None
     maximumThermalGap = 1.0
     for thermalIndex in validThermalTimestamp:
@@ -90,10 +98,9 @@ def buildRecordingDataset(recordingPath, windowSeconds):
             previousFusionTimestamp = None
             continue
 
-         # Skip Corrupted Section Of HomeGardenTam Recording
-        if recordingPath.name == "HomeGardenTam":
-            if 264.0 <= fusionTimestamp <= 342.0:
-                continue
+        # Skip Sections Listed In The Recording's excluded.csv (e.g. sensor dropouts)
+        if any(start <= fusionTimestamp <= end for start, end in excludedIntervals):
+            continue
 
         # The simple PIR detector runs at the PIR sampling rate, not merely at
         # the most recent sample before a thermal frame. Preserve whether ANY
@@ -128,7 +135,6 @@ def buildRecordingDataset(recordingPath, windowSeconds):
 
         # Get PIR History and Current Features
         pirHistoryVector = np.asarray(getHistoryFeatureVector(pirSamples), dtype=np.float64)
-        pirCurrentVector = (np.asarray(getCurrentFeatureVector(pirRelative[pirEnd - 1]), dtype=np.float64))
 
         # Get Thermal Features
         thermalFeatures = getThermalFeatures(thermalRows,int(thermalIndex))
@@ -144,7 +150,6 @@ def buildRecordingDataset(recordingPath, windowSeconds):
             "pirThresholdIntervalActive": interval_active,
             "pirThresholdIntervalPeak": interval_peak,
         }
-        row.update({f"pir{name.capitalize()}": float(value) for name, value in zip(pirCurrentFeatureNames, pirCurrentVector)})
         row.update({f"pir{name.capitalize()}": float(value) for name, value in zip(pirHistoryFeatureNames, pirHistoryVector)})
         row.update({f"thermal{name.capitalize()}": float(thermalFeatures[name]) for name in thermalFeatureNames})
         rows.append(row)
