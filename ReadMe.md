@@ -101,7 +101,7 @@ The important alignment field is `time_s`. Video frames are timestamped individu
 python -m Tools.synchronised_playback --recording "Datasets/training/HomeTamTrain"
 ```
 
-The viewer displays the recorded video alongside the PIR and thermopile signals on their shared timeline. Use **HUMAN START** when a person enters the defined Inbound monitored area, and **HUMAN END** when no person remains inside it. Use **Save labels** (or press `S`) to save:
+The viewer displays the recorded video alongside the PIR and thermopile signals on their shared timeline. The thermopile card replays the recording through the real `ThermopilePipeline`; press `V`/`C` (or `1`-`8`) to step through its stages: raw temperature with detections, background model, difference, Z score, filtered Z score, the recent-frame-average detector, the threshold ratio, and the foreground mask with blobs and tracks. Use **HUMAN START** when a person enters the defined Inbound monitored area, and **HUMAN END** when no person remains inside it. Use **Save labels** (or press `S`) to save:
 
 ```text
 Datasets/training/HomeTamTrain/labels.csv
@@ -122,7 +122,7 @@ There is no video conversion, Label Studio export or `Collection.labels` convers
 
 ## 6. Offline feature extraction and fusion
 
-The dataset loader (`Fusion/dataset.py`) finds recordings recursively by `metadata.json`, so it supports the new folder structure directly. It reads each recording's `labels.csv`, `pir.csv` and `thermopile.csv` and combines the sensor features at thermal-frame times using their shared timestamps.
+The dataset loader (`Fusion/dataset.py`) finds recordings recursively by `metadata.json`. It reads each recording's `labels.csv`, `pir.csv` and `thermopile.csv` and combines the sensor features at thermal-frame times using their shared timestamps. Recordings without `labels.csv` are skipped. Evaluation recordings (validation and testing) also need `labels(outbound).csv`; a header-only label file means nobody was present.
 
 For example, for a 1-second PIR history window at `t = 10.0 s`:
 
@@ -133,12 +133,53 @@ PIR + thermal features                        -> fused feature vector
 Inbound label at t = 10 s                     -> binary training target
 ```
 
-The PIR window length and model selection are configured in the offline processing code. Training, validation and test recordings remain in their separate `Datasets/` folders. Do not mix testing recordings into the model-selection process.
+Training, validation and test recordings remain in their separate `Datasets/` folders. Validation is only used to choose the model, window and alarm thresholds; testing gives the verification result. Run everything from the project directory:
 
-Run the project's offline entry point from the project directory when the required recordings have been labelled:
+```bash
+# 1. Model and window selection: every scikit-learn classifier at every window vs thresholded PIR
+python offlineRun.py --compare --name Compare_22Oct
+
+# 2. Train the first-principles Random Forest at the chosen window, tune its alarm
+#    thresholds on validation and export it to Processed/realtime/fusion_rf.json
+python offlineRun.py --train --window 1.5 --name Train_22Oct
+
+# 3. Final verification of the exported model on the testing recordings
+python offlineRun.py --test --name Test_22Oct
+```
+
+Each run writes `report.txt` and PNG figures to `Processed/<name>/`. Reports check the proposal requirements: Spec 1 (at least 20% accuracy gain and at least 50% fewer false alarms than the thresholded PIR) and Spec 4 (alarm within 10 s); Specs 2 and 3 (range and speed) come from the per-recording table on the testing set. Metric definitions are at the top of `Fusion/evaluation.py`.
+
+| File | Purpose |
+|------|---------|
+| `Fusion/dataset.py` | Builds the fused feature rows from the recordings |
+| `Fusion/randomForest.py` | First-principles Random Forest (training and inference, numpy only) |
+| `Fusion/realtimeModel.py` | Three-state alarm machine and the real-time model wrapper |
+| `Fusion/evaluation.py` | Pd, Pfa, accuracy, Ward event metrics and alarm-threshold tuning |
+| `Fusion/models.py` | scikit-learn comparison of every classifier at every window |
+| `Fusion/report.py` | Report tables and figures |
+
+## 7. Live system on the ROCK
 
 ```bash
 python main.py
 ```
+
+Loads `Processed/realtime/fusion_rf.json`, calibrates both sensors (keep the zone empty) and shows the PIR-only and fused states.
+
+## 8. Demo fallback: replay a recording as if live
+
+```bash
+python -m Tools.demo_replay --recording "Datasets/validation/HomeDadValid" --start 20
+```
+
+Plays the video while feeding the recorded PIR samples and thermal frames through the same real-time code as `main.py` (thermopile pipeline, PIR processor, first-principles Random Forest and state machine). Shows the video, a thermopile processing stage, the PIR signal, and the PIR-only and fused states with the fused confidence. Keys: `Space` pause, `R` restart, `V`/`C` stage, `Q` quit.
+
+## 9. Other tools
+
+- `python -m Thermopile.display` - live thermopile debug dashboard on the ROCK.
+- `python -m PIR.display` - live PIR signal and features on the ROCK.
+- `python -m Tools.export_review_predictions` - runs the most recently trained model (`Processed/realtime/fusion_rf.json`) on every validation and testing recording and writes `review_predictions.csv` into each, so the synchronised playback can show its confidence and states and jump between false alarms (`N`/`P`). `offlineRun.py --train` runs this automatically. Add `--recording <folder>` for a single recording.
+
+- `python -m Tools.contrast_analysis` - measures, for every labelled recording, how warm the hottest pixel gets with a person present vs with nobody present, and writes a table plus two figures (hottest-pixel histograms and typical frames, high vs low contrast) to `Processed/Contrast_Analysis/`.
 
 **Key principle:** video, PIR and thermopile data all use `time_s` relative to the same `T0`; recording names identify sessions without extra timestamp-named directories.

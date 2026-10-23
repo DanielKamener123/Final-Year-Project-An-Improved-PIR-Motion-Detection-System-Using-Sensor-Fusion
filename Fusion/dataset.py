@@ -4,7 +4,11 @@ import numpy as np
 import pandas as pd
 
 from PIR.processing import threshold as PIR_THRESHOLD, preprocessPIR, getHistoryFeatureNames, getHistoryFeatureVector
-from Thermopile.processing import processThermopile, getThermalFeatures, getThermalFeatureNames
+from Thermopile.processing import ThermopilePipeline, getThermalFeatureNames
+
+# Model Input Columns: PIR history features followed by the thermal features
+def getFusedFeatureNames():
+    return getHistoryFeatureNames() + getThermalFeatureNames()
 
 # Gets Labels CSV File
 def loadLabels(labelPath):
@@ -38,24 +42,49 @@ def labelAtTime(labels, videoTime):
     else: 
         return 1
 
+# Runs A Recording's Thermopile Frames Through The Pipeline
+# Returns the frame timestamps and one thermal feature dict per frame.
+def processThermopile(thermalData, metadata, windowSeconds=2.0):
+    frameShape = tuple(int(value) for value in metadata["thermal_frame_shape"])
+    frameLength = int(np.prod(frameShape))
+    pixelColumns = [f"pixel_{i}" for i in range(frameLength)]
+
+    missing = [column for column in pixelColumns if column not in thermalData.columns]
+    if missing:
+        raise ValueError(f"Thermopile CSV is missing {len(missing)} pixel columns")
+
+    # Start from the background saved on the ROCK during calibration
+    pipeline = ThermopilePipeline(frame_shape=frameShape, window_seconds=windowSeconds)
+    pipeline.load_calibration(metadata["thermal_background"], metadata["thermal_sigma"])
+
+    timestamps = thermalData["time_s"].to_numpy(dtype=np.float64)
+    frames = thermalData[pixelColumns].to_numpy(dtype=np.float64).reshape(-1, *frameShape)
+    thermalRows = [pipeline.process(frame, timestamp) for frame, timestamp in zip(frames, timestamps)]
+
+    return timestamps, thermalRows
+
 # Loads All Recroding Folders
 def recordingFolders(datasetPath):
     datasetPath = Path(datasetPath)
     if not datasetPath.exists():
         return []
     
-    # Returns A List With All Folders Containing Metadata
-    return [path.parent for path in datasetPath.rglob("metadata.json")]
+    # Returns A List With All Folders Containing Metadata (sorted so every run uses the same order)
+    return sorted(path.parent for path in datasetPath.rglob("metadata.json"))
 
 
-def buildRecordingDataset(recordingPath, windowSeconds):
+# requireLabels=False also builds unlabelled recordings (every "human" value is 0);
+# used to make predictions on recordings that are not labelled yet.
+def buildRecordingDataset(recordingPath, windowSeconds, requireLabels=True):
     recordingPath = Path(recordingPath)
     labels = loadLabels(recordingPath)
 
     # Makes Sure There Is A Label File
     if labels is None:
-        print(f"Skipping {recordingPath}: labels not found")
-        return pd.DataFrame()
+        if requireLabels:
+            print(f"Skipping {recordingPath}: labels not found")
+            return pd.DataFrame()
+        labels = pd.DataFrame(columns=["start_s", "end_s", "human"])
 
     # Opens Metadata File
     with open(recordingPath / "metadata.json", "r", encoding="utf-8") as metadataFile:
@@ -137,7 +166,7 @@ def buildRecordingDataset(recordingPath, windowSeconds):
         pirHistoryVector = np.asarray(getHistoryFeatureVector(pirSamples), dtype=np.float64)
 
         # Get Thermal Features
-        thermalFeatures = getThermalFeatures(thermalRows,int(thermalIndex))
+        thermalFeatures = thermalRows[int(thermalIndex)]
 
         relativeVideoTime = float(fusionTimestamp)
 
@@ -150,8 +179,8 @@ def buildRecordingDataset(recordingPath, windowSeconds):
             "pirThresholdIntervalActive": interval_active,
             "pirThresholdIntervalPeak": interval_peak,
         }
-        row.update({f"pir{name.capitalize()}": float(value) for name, value in zip(pirHistoryFeatureNames, pirHistoryVector)})
-        row.update({f"thermal{name.capitalize()}": float(thermalFeatures[name]) for name in thermalFeatureNames})
+        row.update({name: float(value) for name, value in zip(pirHistoryFeatureNames, pirHistoryVector)})
+        row.update({name: float(thermalFeatures[name]) for name in thermalFeatureNames})
         rows.append(row)
 
     return pd.DataFrame(rows)
@@ -166,4 +195,7 @@ def buildDataset(datasetPath, windowSeconds):
         if not data.empty:
             allRows.append(data)
 
+    if not allRows:
+        raise ValueError(f"No labelled recordings found in {datasetPath}. Every recording needs a labels.csv "
+                         "(and labels(outbound).csv for evaluation); a header-only file means nobody was present.")
     return pd.concat(allRows, ignore_index=True)

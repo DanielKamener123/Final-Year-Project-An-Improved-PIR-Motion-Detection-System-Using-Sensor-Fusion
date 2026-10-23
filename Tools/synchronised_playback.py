@@ -22,8 +22,8 @@ Controls:
       H               Start / end a human interval
       U               Undo the most recent human interval
       S               Save labels.csv
-      B               Reload background from metadata.json
-      V               Cycle raw / difference / foreground overlay
+      V / C           Next / previous thermopile processing stage
+      1 - 8           Jump to a thermopile processing stage
       Home / R        Restart
       Q / Esc         Quit
 """
@@ -33,11 +33,16 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 import time
 
 import cv2
 import numpy as np
 import pandas as pd
+
+# Import package from project root even when this script is run by filepath.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from Thermopile.processing import ThermopilePipeline
 
 
 THERMAL_HEIGHT = 24
@@ -46,6 +51,21 @@ PIR_HISTORY_SECONDS = 4.0
 PIR_FUTURE_SECONDS = 0.5
 WINDOW_TITLE = "Sensor Fusion Playback"
 TIMELINE_MAX = 10000
+
+# Thermopile processing stages shown in the thermal card (name, key)
+THERMAL_STAGES = [
+    ("Raw temperature + detections", "raw"),
+    ("Background model", "background"),
+    ("Difference from background", "difference"),
+    ("Z score (current frame)", "z"),
+    ("Filtered Z score", "smoothed_z"),
+    ("Filtered Z of recent-frame average", "smoothed_z_avg"),
+    ("Threshold ratio (>1 = foreground)", "ratio"),
+    ("Foreground mask, blobs and tracks", "mask"),
+]
+Z_DISPLAY_MAX = 10.0
+RATIO_DISPLAY_MAX = 3.0
+DIFFERENCE_DISPLAY_C = 5.0
 
 # Layout
 DISPLAY_W = 1280
@@ -136,24 +156,6 @@ def _nearest_index(times: np.ndarray, target: float) -> int:
     if i >= len(times):
         return len(times) - 1
     return i if abs(times[i] - target) < abs(times[i - 1] - target) else i - 1
-
-
-def _thermal_frame(row: pd.Series, display_min: float, display_max: float) -> tuple[np.ndarray, float, float]:
-    pixel_cols = [c for c in row.index if c.startswith("pixel_")]
-    if len(pixel_cols) != THERMAL_WIDTH * THERMAL_HEIGHT:
-        raise ValueError(f"Expected {THERMAL_WIDTH * THERMAL_HEIGHT} thermopile pixels, found {len(pixel_cols)}")
-
-    pixel_cols.sort(key=lambda c: int(c.split("_")[1]))
-    frame = row[pixel_cols].to_numpy(dtype=np.float32).reshape(THERMAL_HEIGHT, THERMAL_WIDTH)
-    finite = frame[np.isfinite(frame)]
-
-    if finite.size == 0:
-        return np.zeros((THERMAL_HEIGHT, THERMAL_WIDTH), dtype=np.uint8), 0.0, 0.0
-
-    t_min = float(np.min(finite))
-    t_max = float(np.max(finite))
-    normalised = np.clip((frame - display_min) * 255.0 / max(display_max - display_min, 1e-9), 0, 255).astype(np.uint8)
-    return normalised, t_min, t_max
 
 
 def _thermal_display_range(thermal: pd.DataFrame) -> tuple[float, float]:
@@ -254,14 +256,19 @@ def _load_predictions(path: Path):
     human = df["human"].to_numpy(dtype=int)
     if np.any(~np.isin(states, (0, 1, 2))) or np.any(~np.isin(human, (0, 1))):
         raise ValueError("Prediction state must be 0/1/2 and human must be 0/1")
-    false_mask = (states > 0) & (human == 0)
+    # Use the exported project false-alarm flag when present
+    if "false_alarm" in df.columns:
+        false_mask = df["false_alarm"].to_numpy(dtype=int) == 1
+    else:
+        false_mask = (states > 0) & (human == 0)
+    labelled = df["labelled"].to_numpy(dtype=int) == 1 if "labelled" in df.columns else np.ones(len(df), dtype=bool)
     # One episode is a contiguous run of incorrect decisions. Split long data gaps.
     starts = np.flatnonzero(false_mask & ~np.r_[False, false_mask[:-1]])
     if len(times) > 1:
         gaps = np.flatnonzero(false_mask[1:] & false_mask[:-1] & (np.diff(times) > 1.0)) + 1
         starts = np.sort(np.r_[starts, gaps])
-    return {"time": times, "score": scores, "state": states,
-            "human": human, "false": false_mask, "starts": times[starts]}
+    return {"time": times, "score": scores, "state": states, "human": human, "labelled": labelled,
+            "false": false_mask, "starts": times[starts]}
 
 
 def _review_at(predictions, timestamp):
@@ -271,8 +278,9 @@ def _review_at(predictions, timestamp):
     i = int(np.searchsorted(predictions["time"], timestamp, side="right") - 1)
     if i < 0:
         return None
+    human = int(predictions["human"][i]) if predictions["labelled"][i] else None
     return (float(predictions["score"][i]), int(predictions["state"][i]),
-            int(predictions["human"][i]), bool(predictions["false"][i]),
+            human, bool(predictions["false"][i]),
             float(timestamp - predictions["time"][i]))
 
 
@@ -543,59 +551,109 @@ def _on_mouse(event, x, y, flags, param):
         _ui_state["timeline_drag"] = False
 
 
-def _read_background_metadata(recording_dir: Path):
-    """Use sensor acquisition reference; never estimate background from human footage."""
+def _replay_thermal(recording_dir: Path, pixels: np.ndarray, times: np.ndarray):
+    """Run every thermal frame through the real ThermopilePipeline once, keeping each stage."""
     with (recording_dir / "metadata.json").open(encoding="utf-8") as f:
         meta = json.load(f)
-    background = np.asarray(meta["thermal_background"], dtype=np.float32).reshape(THERMAL_HEIGHT, THERMAL_WIDTH)
-    sigma = np.asarray(meta.get("thermal_sigma", [0.2] * background.size), dtype=np.float32).reshape(background.shape)
-    valid = np.isfinite(background) & (background > -40) & (background < 150)
-    background[~valid] = np.nan
-    sigma[~np.isfinite(sigma) | (sigma <= 0) | (sigma > 20)] = 0.2
-    return background, sigma, valid
+    pipeline = ThermopilePipeline((THERMAL_HEIGHT, THERMAL_WIDTH))
+    pipeline.load_calibration(meta["thermal_background"], meta["thermal_sigma"])
+    shape = (len(pixels), THERMAL_HEIGHT, THERMAL_WIDTH)
+    stages = {key: np.zeros(shape, dtype=np.float32) for _, key in THERMAL_STAGES if key != "mask"}
+    stages["mask"] = np.zeros(shape, dtype=bool)
+    glitch = np.zeros(len(pixels), dtype=bool)
+    detections = []
+    for i, (frame, t) in enumerate(zip(pixels.astype(np.float64), times)):
+        background_before = pipeline.bg_model.bg.copy()
+        features = pipeline.process(frame, t)
+        glitch[i] = not pipeline.last_frame_valid
+        stages["raw"][i] = frame
+        stages["background"][i] = background_before
+        # Difference the pipeline actually used: background moved by the scene shift
+        stages["difference"][i] = frame - (background_before + (0.0 if glitch[i] else pipeline.last_shift))
+        stages["z"][i] = pipeline.last_raw_z
+        stages["smoothed_z"][i] = pipeline.last_smoothed_z
+        stages["smoothed_z_avg"][i] = pipeline.last_smoothed_z_avg
+        stages["ratio"][i] = pipeline.last_ratio
+        stages["mask"][i] = pipeline.last_mask
+        blobs = []
+        for d in pipeline.last_detections:
+            track = pipeline._tracks.get(d.features.track_id)
+            blobs.append((d.blob.bbox, d.features.track_id, d.features.track_id == pipeline.primary_track_id,
+                          track.traversed_px if track is not None else 0.0))
+        detections.append((blobs, features))
+    return stages, glitch, detections
 
 
-def _prepare_thermal_view(frame, background, sigma, valid_bg, mode):
-    """Show a stable, noise-aware thermal visualization, not ground-truth labels."""
-    good = valid_bg & np.isfinite(frame) & (frame > -40) & (frame < 150)
-    delta = np.where(good, frame - background, 0.0)
-    # The small static model offset is preserved; don't subtract the median
-    # of the current frame, because a large nearby person may dominate it.
-    if mode == 0:
-        # Raw: per-frame robust contrast excluding invalid pixel values.
-        values = frame[good]
-        if values.size:
-            lo, hi = np.percentile(values, [3, 98])
-            lo, hi = float(lo)-0.5, float(hi)+0.5
-            if hi-lo < 4: hi = lo+4
-        else:
-            lo, hi = 18.0, 36.0
-        intensity = np.clip((np.where(good, frame, lo)-lo)/(hi-lo)*255, 0, 255).astype(np.uint8)
-        img = cv2.applyColorMap(intensity, cv2.COLORMAP_INFERNO)
-        desc = f"Raw {lo:.1f} to {hi:.1f} C"
-    elif mode == 1:
-        # Dark background with hot residuals in yellow/white; highlights
-        # roughly 0..5 degrees above the per-pixel saved background.
-        intensity = np.clip(np.maximum(delta, 0)/5.0*255, 0, 255).astype(np.uint8)
-        img = cv2.applyColorMap(intensity, cv2.COLORMAP_INFERNO)
-        desc = "Above saved background: 0 to +5 C"
+def _colour_map(values, low, high, colormap):
+    scaled = np.clip((np.asarray(values, dtype=np.float32) - low) * 255.0 / max(high - low, 1e-9), 0, 255)
+    return cv2.applyColorMap(scaled.astype(np.uint8), colormap)
+
+
+def _diverging(values, limit):
+    """Blue below zero, red above zero, dark at zero (BGR)."""
+    v = np.clip(np.asarray(values, dtype=np.float32) / limit, -1.0, 1.0)
+    img = np.full(v.shape + (3,), 30, dtype=np.float32)
+    img[..., 2] += 225 * np.clip(v, 0, 1)
+    img[..., 0] += 225 * np.clip(-v, 0, 1)
+    return img.astype(np.uint8)
+
+
+def _draw_colour_bar(canvas, bar, x, y, w, h):
+    if bar is None:
+        return
+    colormap, high_label, low_label = bar
+    gradient = np.linspace(255, 0, h, dtype=np.float32).reshape(-1, 1)
+    if colormap == "diverging":
+        colour_bar = _diverging(gradient / 127.5 - 1.0, 1.0)
     else:
-        # Foreground segmentation proxy, based on recorded per-pixel noise.
-        # Not necessarily identical to the live thermopile processing mask.
-        smoothed = cv2.GaussianBlur(delta.astype(np.float32),(3,3),0.65)
-        signal = smoothed > np.maximum(1.5, 3.0*sigma)
-        signal &= good
-        # Intuitive grey scene + vivid yellow foreground.
-        rawvals = frame[good]
-        if rawvals.size:
-            lo, hi = np.percentile(rawvals, [3, 98]); hi=max(hi, lo+4)
-        else: lo, hi = 18.0, 36.0
-        base = np.clip((np.where(good, frame, lo)-lo)/(hi-lo)*140+35,0,255).astype(np.uint8)
-        img = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
-        img[signal] = (0, 220, 255)
-        desc = f"Foreground (>max(1.5 C, 3 sigma)): {int(signal.sum())} px"
-    img[~good] = (35, 35, 35)
-    return img, desc
+        colour_bar = cv2.applyColorMap(gradient.astype(np.uint8), colormap)
+    canvas[y:y + h, x:x + w] = np.repeat(colour_bar, w, axis=1)
+    _text(canvas, high_label, x - 10, y - 7, 0.38, MUTED)
+    _text(canvas, low_label, x - 10, y + h + 15, 0.38, MUTED)
+
+
+def _thermal_stage_view(frame_stages, glitch, blobs, features, mode, raw_range, width, height):
+    """Render one processing stage of one frame at the display size.
+
+    frame_stages: {stage key: 24x32 array}. Returns image, description and colour bar.
+    """
+    key = THERMAL_STAGES[mode][1]
+    raw_low, raw_high = raw_range
+    if key in ("raw", "background"):
+        img = _colour_map(frame_stages[key], raw_low, raw_high, cv2.COLORMAP_INFERNO)
+        bar = (cv2.COLORMAP_INFERNO, f"{raw_high:.0f}C", f"{raw_low:.0f}C")
+    elif key == "difference":
+        img = _diverging(frame_stages[key], DIFFERENCE_DISPLAY_C)
+        bar = ("diverging", f"+{DIFFERENCE_DISPLAY_C:g}C", f"-{DIFFERENCE_DISPLAY_C:g}C")
+    elif key in ("z", "smoothed_z", "smoothed_z_avg"):
+        img = _colour_map(frame_stages[key], 0.0, Z_DISPLAY_MAX, cv2.COLORMAP_VIRIDIS)
+        bar = (cv2.COLORMAP_VIRIDIS, f"{Z_DISPLAY_MAX:g}", "0")
+    elif key == "ratio":
+        img = _colour_map(frame_stages[key], 0.0, RATIO_DISPLAY_MAX, cv2.COLORMAP_VIRIDIS)
+        bar = (cv2.COLORMAP_VIRIDIS, f"{RATIO_DISPLAY_MAX:g}x", "0")
+    else:
+        grey = np.clip((frame_stages["raw"] - raw_low) / max(raw_high - raw_low, 1e-9) * 140 + 35, 0, 255)
+        img = cv2.cvtColor(grey.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        img[frame_stages["mask"]] = (0, 220, 255)
+        bar = None
+    img = cv2.resize(img, (width, height), interpolation=cv2.INTER_NEAREST)
+
+    if key in ("raw", "mask"):
+        sx, sy = width / THERMAL_WIDTH, height / THERMAL_HEIGHT
+        for (r0, c0, r1, c1), track_id, primary, traversed in blobs:
+            colour = ACCENT_2 if primary else (255, 255, 0)
+            p1 = (int(c0 * sx), int(r0 * sy))
+            p2 = (int((c1 + 1) * sx) - 1, int((r1 + 1) * sy) - 1)
+            cv2.rectangle(img, p1, p2, colour, 3 if primary else 1, cv2.LINE_AA)
+            _text(img, f"ID {track_id}  {traversed:.1f}px", p1[0] + 2, max(14, p1[1] - 4), 0.42, colour, 1)
+
+    if glitch:
+        description = "Glitch frame: ignored by the pipeline"
+    else:
+        description = (f"Blobs {int(features['thermalNumberOfBlobs'])}  |  "
+                       f"max traversed {features['thermalMaxBlobTraversed']:.1f}px  |  "
+                       f"max Z {features['thermalMaxZ']:.1f}")
+    return img, description, bar
 
 
 def main() -> None:
@@ -623,7 +681,8 @@ def main() -> None:
     thermal_display_min, thermal_display_max = _thermal_display_range(thermal)
     thermal_pixel_cols = sorted((c for c in thermal.columns if c.startswith("pixel_")), key=lambda c: int(c.split("_")[1]))
     thermal_pixels = thermal[thermal_pixel_cols].to_numpy(dtype=np.float32).reshape(-1, THERMAL_HEIGHT, THERMAL_WIDTH)
-    background_frame, background_sigma, background_valid = _read_background_metadata(recording_dir)
+    print("Running the thermopile frames through the processing pipeline...")
+    thermal_stages, thermal_glitch, thermal_detections = _replay_thermal(recording_dir, thermal_pixels, thermal_t)
 
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
@@ -652,9 +711,6 @@ def main() -> None:
         "status_until": 0.0,
         "thermal_mode": 0,
         "review_predictions": predictions,
-        "background_frame": background_frame,
-        "background_sigma": background_sigma,
-        "background_valid": background_valid,
     })
 
     labels = _load_labels(recording_dir, usable_frames, video_t)
@@ -773,45 +829,39 @@ def main() -> None:
             colour = (ACCENT_2, WARNING, ACCENT)[state]
             _rounded_rect(canvas, (vx0 + 6, vy0 + 8), (vx0 + 365, vy0 + 64), BG, 8)
             _text(canvas, f"ML: {state_name}  |  confidence {score:.3f}", vx0 + 16, vy0 + 30, .52, colour, 2)
-            _text(canvas, f"Label: {'HUMAN' if actual else 'EMPTY'}  |  {'FALSE ALARM' if false else 'No false alarm'}  |  age {age:.2f}s",
+            label_name = "NOT LABELLED" if actual is None else ("HUMAN" if actual else "EMPTY")
+            _text(canvas, f"Label: {label_name}  |  {'FALSE ALARM' if false else 'No false alarm'}  |  age {age:.2f}s",
                   vx0 + 16, vy0 + 51, .43, WARNING if false else TEXT)
             if false:
                 cv2.rectangle(canvas, (vx0, vy0),
                               (vx0 + video_view.shape[1] - 1, vy0 + video_view.shape[0] - 1),
                               WARNING, 3, cv2.LINE_AA)
 
-        # Thermopile card
+        # Thermopile card: one processing stage of the real pipeline
         _draw_card(canvas, RIGHT_PANEL_X, video_y, RIGHT_PANEL_W, video_h, "Thermopile", f"t = {thermal_time:.3f}s")
-        thermal_norm, t_min, t_max = _thermal_frame(
-            thermal.iloc[thermal_index], thermal_display_min, thermal_display_max
-        )
         mode = _ui_state["thermal_mode"]
-        bg_frame = _ui_state["background_frame"]
-        mode_names = ("RAW", "BACKGROUND DIFFERENCE", "FOREGROUND HIGHLIGHT")
-        heat, thermal_description = _prepare_thermal_view(
-            thermal_pixels[thermal_index], bg_frame,
-            _ui_state["background_sigma"], _ui_state["background_valid"], mode
-        )
-        colour_low, colour_high = thermal_display_min, thermal_display_max
         colour_bar_w = 18
         colour_bar_gap = 12
         heat_w = RIGHT_PANEL_W - 28 - colour_bar_gap - colour_bar_w
-        heat_h = video_h - 114
-        heat = cv2.resize(heat, (heat_w, heat_h), interpolation=cv2.INTER_NEAREST)
+        heat_h = video_h - 150
+        frame_stages = {key: values[thermal_index] for key, values in thermal_stages.items()}
+        blobs, features = thermal_detections[thermal_index]
+        heat, thermal_description, bar = _thermal_stage_view(
+            frame_stages, thermal_glitch[thermal_index], blobs, features, mode,
+            (thermal_display_min, thermal_display_max), heat_w, heat_h
+        )
         tx0, ty0 = RIGHT_PANEL_X + 14, video_y + 54
         canvas[ty0:ty0 + heat_h, tx0:tx0 + heat_w] = heat
 
-        gradient = np.linspace(255, 0, heat_h, dtype=np.uint8).reshape(-1, 1)
-        colour_bar = cv2.applyColorMap(gradient, cv2.COLORMAP_INFERNO)
-        bar_x = tx0 + heat_w + colour_bar_gap
-        canvas[ty0:ty0 + heat_h, bar_x:bar_x + colour_bar_w] = np.repeat(colour_bar, colour_bar_w, axis=1)
-        if mode == 1:
-            _text(canvas, "+5C", bar_x - 7, ty0 - 7, 0.38, MUTED)
-            _text(canvas, "0C", bar_x - 7, ty0 + heat_h + 15, 0.38, MUTED)
+        _draw_colour_bar(canvas, bar, tx0 + heat_w + colour_bar_gap, ty0, colour_bar_w, heat_h)
 
-        _text(canvas, f"Frame {t_min:.1f}-{t_max:.1f} C", tx0, video_y + video_h - 18, 0.46, MUTED)
-        _text(canvas, f"{mode_names[mode]} | V: switch", tx0, video_y + video_h - 61, 0.40, ACCENT_2)
-        _text(canvas, thermal_description, tx0, video_y + video_h - 77, 0.37, MUTED)
+        frame_values = thermal_pixels[thermal_index]
+        _text(canvas, f"Frame {float(frame_values.min()):.1f}-{float(frame_values.max()):.1f} C",
+              tx0, video_y + video_h - 18, 0.46, MUTED)
+        _text(canvas, f"{mode + 1}/{len(THERMAL_STAGES)} {THERMAL_STAGES[mode][0]} | V/C: stage",
+              tx0, video_y + video_h - 61, 0.40, ACCENT_2)
+        _text(canvas, thermal_description, tx0, video_y + video_h - 77, 0.37,
+              WARNING if thermal_glitch[thermal_index] else MUTED)
         offset_colour = ACCENT_2 if abs(thermal_offset) <= 0.15 else WARNING
         _text(canvas, f"Offset {thermal_offset:+.3f}s", tx0, video_y + video_h - 42, 0.48, offset_colour, 1)
 
@@ -857,18 +907,14 @@ def main() -> None:
             else:
                 _ui_state["status_message"] = "No more false alarms in this direction"
                 _ui_state["status_until"] = time.perf_counter() + 2.0
-        elif key == ord("b"):
-
-            # Reload the acquisition reference, never capture a new one.
-            bg, sig, valid = _read_background_metadata(recording_dir)
-            _ui_state["background_frame"] = bg
-            _ui_state["background_sigma"] = sig
-            _ui_state["background_valid"] = valid
-            _ui_state["status_message"] = "Reloaded recorded thermal background"
-            _ui_state["status_until"] = time.perf_counter() + 2.0
-        elif key == ord("v"):
-            _ui_state["thermal_mode"] = (_ui_state["thermal_mode"] + 1) % 3
-            _ui_state["status_message"] = ("Raw thermal", "Background difference", "Foreground highlight")[_ui_state["thermal_mode"]]
+        elif key in (ord("v"), ord("c")) or ord("1") <= key <= ord("0") + len(THERMAL_STAGES):
+            if key == ord("v"):
+                _ui_state["thermal_mode"] = (_ui_state["thermal_mode"] + 1) % len(THERMAL_STAGES)
+            elif key == ord("c"):
+                _ui_state["thermal_mode"] = (_ui_state["thermal_mode"] - 1) % len(THERMAL_STAGES)
+            else:
+                _ui_state["thermal_mode"] = key - ord("1")
+            _ui_state["status_message"] = THERMAL_STAGES[_ui_state["thermal_mode"]][0]
             _ui_state["status_until"] = time.perf_counter() + 2.0
         elif key == ord("h"):
             if _ui_state["human_start"] is None:

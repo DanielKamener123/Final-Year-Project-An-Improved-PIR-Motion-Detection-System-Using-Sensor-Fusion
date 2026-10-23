@@ -33,7 +33,11 @@ def getFrame():
             # Transient MLX90640 frame error; do not retry forever.
             if attempt == 4:
                 raise
-    raise RuntimeError("Unable to acquire MLX90640 frame")
+    raise RuntimeError("Unable to acquire thermopile frame")
+
+# Reads Frames For Background Calibration - Make Sure No One Is In Frame
+def getCalibrationFrames(frameCount):
+    return [getFrame() for _ in range(int(frameCount))]
 
 
 if __name__ == "__main__":

@@ -1,66 +1,91 @@
-"""Export real offline ML outputs for the synchronised playback review tool.
+"""Export the first-principles model's outputs for the synchronised playback review tool.
 
 Run from your project root:
- python -m Tools.export_review_predictions --recording Datasets/validation/NAME --model 'RBF SVM' --window 1.5
+ python -m Tools.export_review_predictions                         (every validation and testing recording)
+ python -m Tools.export_review_predictions --recording Datasets/validation/NAME
 
-The model is trained ONLY with Datasets/training, never the reviewed recording.
+Uses the most recently trained real-time model (Processed/realtime/fusion_rf.json,
+written by offlineRun.py --train, which also runs this export automatically) with its
+frozen alarm thresholds, and writes review_predictions.csv into each recording. The
+playback tool then shows the model's confidence and state and can jump between false
+alarms. Recordings without labels.csv are still predicted; they are marked unlabelled.
 """
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import numpy as np
 import pandas as pd
 
-from Fusion.dataset import buildDataset, buildRecordingDataset
-from Fusion.models import buildModels, prepareFeatures, confidenceScores, applyThreeState
+from Fusion.dataset import buildRecordingDataset, recordingFolders
+from Fusion.evaluation import addOutboundLabels, runStateMachine
+from Fusion.randomForest import RandomForest
+
+MODEL_PATH = Path('Processed/realtime/fusion_rf.json')
+REVIEW_SPLITS = [Path('Datasets/validation'), Path('Datasets/testing')]
+
+
+# Predictions For One Recording -> review_predictions.csv
+def exportRecording(forest, recording, output=None):
+    recording = Path(recording)
+    labelled = (recording / 'labels.csv').is_file()
+    data = buildRecordingDataset(recording, windowSeconds=forest.window, requireLabels=False)
+    if data is None or len(data) == 0:
+        print(f'  {recording.name}: no usable fusion intervals, skipped')
+        return None
+    score = forest.predictProba(data[forest.features].to_numpy(dtype=float))
+    state = runStateMachine(data, score, forest.thresholds)
+
+    out = pd.DataFrame({
+        'time_s': data['fusionTime'].to_numpy(float),
+        'confidence': score,
+        'state': state,
+        'human': data['human'].to_numpy(int),
+        'labelled': int(labelled),
+    })
+    # Project false-alarm definition when outbound labels exist
+    if not labelled:
+        out['false_alarm'] = 0
+    elif (recording / 'labels(outbound).csv').is_file():
+        outbound = addOutboundLabels(data)['outboundHuman'].to_numpy(int)
+        out['false_alarm'] = ((out['human'] == 0) & ((out['state'] == 2) |
+                                                      ((out['state'] == 1) & (outbound == 0)))).astype(int)
+    else:
+        out['false_alarm'] = ((out['human'] == 0) & (out['state'] > 0)).astype(int)
+    out = out.sort_values('time_s', kind='stable').reset_index(drop=True)
+
+    target = Path(output) if output else recording / 'review_predictions.csv'
+    target.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(target, index=False)
+    note = f'{int(out["false_alarm"].sum())} false-alarm intervals' if labelled else 'not labelled'
+    print(f'  {recording.name}: {len(out)} decisions ({note})')
+    return target
+
+
+# Predictions For Every Validation And Testing Recording
+def exportAll(modelPath=MODEL_PATH, splits=REVIEW_SPLITS):
+    forest = RandomForest.load(modelPath)
+    print(f'Exporting review predictions with {modelPath} ({forest.window:g} s window)...')
+    for split in splits:
+        for recording in recordingFolders(split):
+            exportRecording(forest, recording)
 
 
 def main():
     parser = argparse.ArgumentParser(description='Export model confidence and states for synchronised review.')
-    parser.add_argument('--recording', type=Path, required=True, help='One labelled validation/testing recording directory')
-    parser.add_argument('--training', type=Path, default=Path('Datasets/training'))
-    parser.add_argument('--model', default='RBF SVM', choices=list(buildModels()))
-    parser.add_argument('--window', type=float, default=1.5, help='PIR history window in seconds')
-    parser.add_argument('--pir-only', action='store_true', help='Use PIR-only rather than feature fusion')
-    parser.add_argument('--output', type=Path, help='Default: recording/review_predictions.csv')
+    parser.add_argument('--recording', type=Path, help='One recording (default: every validation and testing recording)')
+    parser.add_argument('--model', type=Path, default=MODEL_PATH)
+    parser.add_argument('--output', type=Path, help='Only with --recording. Default: recording/review_predictions.csv')
     args = parser.parse_args()
+
+    if args.recording is None:
+        exportAll(args.model)
+        return
     recording = args.recording.resolve()
-    if args.window <= 0:
-        parser.error('--window must be positive')
     if not recording.is_dir():
         parser.error(f'Recording folder not found: {recording}')
-    if args.training.resolve() == recording or args.training.resolve() in recording.parents:
-        parser.error('Refusing to evaluate training recordings. Use a validation/testing recording.')
-
-    print('Building training features...')
-    train = buildDataset(args.training, windowSeconds=args.window)
-    print('Building reviewed recording features...')
-    test = buildRecordingDataset(recording, windowSeconds=args.window)
-    if test is None or len(test) == 0:
-        raise ValueError('No usable labelled fusion decisions in recording')
-    pir_features = [c for c in train.columns if c.startswith('pir') and c != 'pirMeanSignalEnergy']
-    thermal_features = [c for c in train.columns if c.startswith('thermal') and c != 'thermalTrack_id']
-    features = pir_features if args.pir_only else pir_features + thermal_features
-    xtrain, xtest = prepareFeatures(train, test, features)
-    model = buildModels()[args.model]
-    model.fit(xtrain, train['human'])
-    score = confidenceScores(model, xtest)
-    state = applyThreeState(score, test)
-    out = pd.DataFrame({
-        'time_s': test['fusionTime'].to_numpy(float),
-        'confidence': score,
-        'state': state,
-        'human': test['human'].to_numpy(int),
-    })
-    out = out.sort_values('time_s', kind='stable').reset_index(drop=True)
-    out['false_alarm'] = ((out['human'] == 0) & (out['state'] > 0)).astype(int)
-    target = args.output if args.output else recording / 'review_predictions.csv'
-    target.parent.mkdir(parents=True, exist_ok=True)
-    out.to_csv(target, index=False)
-    print(f'Saved {len(out)} decision rows to {target}')
-    print(f'Model: {args.model} | {"PIR only" if args.pir_only else "Fusion"} | PIR window: {args.window}s')
-    print('NOTE: These are model predictions from the current offline feature pipeline.')
+    if 'training' in recording.parts:
+        parser.error('Refusing to review a training recording. Use a validation/testing recording.')
+    exportRecording(RandomForest.load(args.model), recording, args.output)
 
 
 if __name__ == '__main__':

@@ -4,11 +4,8 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import matplotlib.patches as patches
 
-from Thermopile.processing import (
-    getFrame, getDetections, warmUp,
-    getBackground, getSigma, getRawZ, getSmoothedZ, getMask,
-    getThreshold, getSceneTemp, getPrimaryTrackId,
-)
+from Thermopile.interface import getFrame, getCalibrationFrames
+from Thermopile.processing import ThermopilePipeline
 
 WIDTH = 32
 HEIGHT = 24
@@ -19,6 +16,17 @@ DISPLAY_MAX_TEMP = 40
 
 # Fixed Color Scale For Z Score 
 Z_DISPLAY_MAX = 10.0
+
+# Background Calibration
+N_WARMUP_FRAMES = 20
+
+pipeline = ThermopilePipeline()
+
+# Captures frames to use as initialised background model
+def warmUp():
+    print(f"Warm up Starting - Make Sure No One Is In Frame")
+    pipeline.calibrate(getCalibrationFrames(N_WARMUP_FRAMES))
+    print("Warm Up Complete")
 
 # Panels, in the order they occupy the 2x3 grid. 'key' is the number
 # key that focuses/unfocuses that panel to fill the whole figure.
@@ -38,15 +46,7 @@ HELP_TEXT = (
 
 # Converts 1D Array To 2D Array
 def flat_to_grid(flat_frame):
-    """Convert a flat 768-element list into a 24x32 list of lists."""
     return [flat_frame[row * WIDTH:(row + 1) * WIDTH] for row in range(HEIGHT)]
-
-# Format Values For Displaying
-def _format_value(value):
-    if isinstance(value, float):
-        return f"{value:.2f}"
-    return str(value)
-
 
 class DebugDashboard:
     def __init__(self):
@@ -153,13 +153,13 @@ class DebugDashboard:
         import numpy as np
         np.savez(
             filename,
-            background=getBackground(),
-            sigma=getSigma(),
-            raw_z=getRawZ(),
-            smoothed_z=getSmoothedZ(),
-            mask=getMask(),
-            threshold=getThreshold(),
-            scene_temp=getSceneTemp(),
+            background=pipeline.bg_model.bg,
+            sigma=pipeline.bg_model.sigma,
+            raw_z=pipeline.last_raw_z,
+            smoothed_z=pipeline.last_smoothed_z,
+            mask=pipeline.last_mask,
+            threshold=pipeline.last_threshold,
+            scene_temp=pipeline.last_scene_temp,
         )
         print(f"Saved snapshot to {filename}")
 
@@ -214,10 +214,10 @@ class DebugDashboard:
         lines = [
             f"Frame:       {self.frame_count}",
             f"FPS:         {self.fps:.1f}",
-            f"Scene temp:  {getSceneTemp():.2f} C",
-            f"Threshold:   {getThreshold():.2f}",
+            f"Scene temp:  {pipeline.last_scene_temp:.2f} C",
+            f"Threshold:   {pipeline.last_threshold:.2f}",
             f"Detections:  {len(detections)}",
-            f"Primary:     {getPrimaryTrackId()}",
+            f"Primary:     {pipeline.primary_track_id}",
             "",
         ]
 
@@ -285,19 +285,20 @@ class DebugDashboard:
         self.frame_count += 1
 
         rawFrame = getFrame()
+        pipeline.process(rawFrame, time.time())
         grid = flat_to_grid(rawFrame)
-        detections = getDetections()
+        detections = pipeline.last_detections
 
         if "raw" in self.images_by_kind:
             self.images_by_kind["raw"].set_data(grid)
         if "background" in self.images_by_kind:
-            self.images_by_kind["background"].set_data(getBackground())
+            self.images_by_kind["background"].set_data(pipeline.bg_model.bg)
         if "mask" in self.images_by_kind:
-            self.images_by_kind["mask"].set_data(getMask())
+            self.images_by_kind["mask"].set_data(pipeline.last_mask)
         if "raw_z" in self.images_by_kind:
-            self.images_by_kind["raw_z"].set_data(getRawZ())
+            self.images_by_kind["raw_z"].set_data(pipeline.last_raw_z)
         if "smoothed_z" in self.images_by_kind:
-            self.images_by_kind["smoothed_z"].set_data(getSmoothedZ())
+            self.images_by_kind["smoothed_z"].set_data(pipeline.last_smoothed_z)
 
         self._clear_overlays()
         if "raw" in self.axes_by_kind:

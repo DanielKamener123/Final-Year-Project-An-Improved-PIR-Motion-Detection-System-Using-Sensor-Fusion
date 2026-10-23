@@ -9,10 +9,9 @@ import tkinter as tk
 from tkinter import ttk
 
 from PIR.interface import PIRAcquisition, sampleRateHz
-from PIR.processing import (PIRProcessor, getHistoryFeatureNames,
-                            getHistoryFeatureVector, warmupTime)
+from PIR.processing import PIRProcessor, warmupTime
 from Thermopile.interface import getFrame, REFRESH_RATE_HZ
-from Thermopile.processing import LiveThermalProcessor, getThermalFeatureNames
+from Thermopile.processing import ThermopilePipeline
 from Fusion.realtimeModel import RealtimeModel
 
 class StateLights(ttk.LabelFrame):
@@ -107,11 +106,11 @@ class LiveGUI:
 class RealTimeSystem:
     def __init__(self, folder):
         self.model = RealtimeModel(folder / "fusion_rf.json")
-        self.window = self.model.fusion.window
+        self.window = self.model.window
         self.acquisitionQueue = queue.Queue(maxsize=4096)
         self.pirAcquisition = PIRAcquisition(self.acquisitionQueue)
         self.pirProcessor = PIRProcessor(self.acquisitionQueue, windowTime=self.window)
-        self.thermal = LiveThermalProcessor(window_seconds=self.window)
+        self.thermal = ThermopilePipeline(window_seconds=self.window)
         self.stopEvent = threading.Event()
         self.lock = threading.Lock()
         self.latest = {"warmup": "Preparing sensors...", "status": "Starting"}
@@ -168,30 +167,20 @@ class RealTimeSystem:
             frame = getFrame()
             timestamp = time.time()  # Timestamp immediately after a complete sensor read.
             if timestamp < ready_at:
-                self.thermal.process(timestamp, frame)
+                self.thermal.process(frame, timestamp)
                 continue
             # Keep thermal tracking and background adaptation running even if PIR is unavailable.
             started = time.monotonic()
-            thermal_features = self.thermal.process(timestamp, frame)
+            thermal_features = self.thermal.process(frame, timestamp)
             if not self.pirProcessor.initialised or self.pirProcessor.lastError is not None:
                 self.publish(pir_state="UNAVAILABLE", fusion_state="UNAVAILABLE",
                              status=f"PIR error: {self.pirProcessor.lastError}")
                 continue
             samples = self.pirProcessor.getWindowSamples(self.window, endTime=timestamp)
-            if len(samples) < 2 or samples[0][0] > timestamp - self.window + 0.15:
-                self.publish(pir_state="UNAVAILABLE", fusion_state="UNAVAILABLE",
-                             status="Insufficient PIR history; waiting for samples")
+            result, problem = self.model.fuse(thermal_features, samples, timestamp)
+            if result is None:
+                self.publish(pir_state="UNAVAILABLE", fusion_state="UNAVAILABLE", status=problem)
                 continue
-            newest = samples[-1][0]
-            if timestamp - newest > 0.3:
-                self.publish(pir_state="UNAVAILABLE", fusion_state="UNAVAILABLE",
-                             status="Stale PIR samples")
-                continue
-            history = getHistoryFeatureVector(samples)
-            row = {}
-            row.update({f"pir{name.capitalize()}": float(v) for name, v in zip(getHistoryFeatureNames(), history)})
-            row.update({f"thermal{name.capitalize()}": float(thermal_features[name]) for name in getThermalFeatureNames()})
-            result = self.model.predict(row, timestamp, pirVoltage=samples[-1][1])
             elapsed_ms = (time.monotonic() - started) * 1000.0
             self.publish(warmup="READY — both sensors calibrated", **result,
                          status=f"PIR {sampleRateHz} Hz target · Thermal {REFRESH_RATE_HZ:g} Hz target · Processing {elapsed_ms:.1f} ms")

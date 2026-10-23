@@ -10,10 +10,10 @@ warmupTime = 10
 threshold = 0.2
 rollingWindow = 1.5
 
-#Baseline corrected Samples
+# Baseline corrected Samples
 historyBuffer = 2
 
-# Get The Context Features From The Last PIR Samples In History Buffer
+# Get The PIR Features From The Last PIR Samples In History Buffer
 def getHistoryFeatureVector(samples):
     # Check For No Samples
     if not samples:
@@ -23,7 +23,7 @@ def getHistoryFeatureVector(samples):
     timestamps = np.asarray([ts for ts, _ in samples])
     values = np.asarray([value for _, value in samples])
 
-    # Calculate Peak To Peak (Feature 1)
+    # Calculate Peak To Peak
     positivePeak = float(np.max(values))
     negativePeak = float(np.min(values))
     peakToPeak = float(positivePeak - negativePeak)
@@ -31,16 +31,18 @@ def getHistoryFeatureVector(samples):
     # Calculate RMS
     rms = float(np.sqrt(np.mean(values ** 2)))
 
-    # Total time active in the history window (rather than first-to-last
-    # threshold crossing). Estimate seconds per sample from PIR timestamps.
-    # This works with the same live and offline feature extraction function.
+    # Total time active in the history window
     active = np.abs(values) >= float(threshold)
+    # Get all intervals between samples
     intervals = np.diff(timestamps)
+    # Remove invalid samples
     valid_intervals = intervals[np.isfinite(intervals) & (intervals > 0)]
+    # Get estimated sample period
     sample_period = float(np.median(valid_intervals)) if valid_intervals.size else 0.0
+    # Counts number of active samples
     activityDuration = float(np.count_nonzero(active) * sample_period)
 
-    # Calculate Peak Separation (Feature 3)
+    # Calculate Peak Separation
     maxPeakIndex = int(np.argmax(values))
     minPeakIndex = int(np.argmin(values))
     peak_separation = float(abs(timestamps[maxPeakIndex] - timestamps[minPeakIndex]))
@@ -57,12 +59,12 @@ def getHistoryFeatureVector(samples):
 
 def getHistoryFeatureNames():
     return [
-        "positivePeak",
-        "negativePeak",
-        "peakToPeak",
-        "rms",
-        "activityDuration",
-        "peakSeparation",
+        "pirPositivePeak",
+        "pirNegativePeak",
+        "pirPeakToPeak",
+        "pirRms",
+        "pirActivityDuration",
+        "pirPeakSeparation",
     ]
 
 class PIRProcessor:
@@ -73,7 +75,8 @@ class PIRProcessor:
         self.sampleQueue = sampleQueue
         self.outputQueue = queue.Queue(maxsize=4096)
         self.windowTime = float(windowTime)
-        self.maxHistoryTime = historyBuffer
+        # History must always cover the feature window (e.g. 5 s windows)
+        self.maxHistoryTime = max(historyBuffer, self.windowTime)
 
         # Baseline Voltage
         self.baselineVoltage = 0.0 if initialBaseline is None else float(initialBaseline)
@@ -111,7 +114,6 @@ class PIRProcessor:
             self.initialised = True
 
     def processSample(self, ts, v):
-        # Validation - TODO: Can Remove
         ts, v = float(ts), float(v)
         if not np.isfinite(ts) or not np.isfinite(v):
             raise ValueError("PIR timestamp and voltage must be finite")
@@ -193,6 +195,19 @@ class PIRProcessor:
             return float(self.baselineVoltage)
 
 
+# Offline PIR signal preprocessing; uses the same PIRProcessor as live sampling
+def preprocessPIR(pirData, initialBaseline, windowSeconds):
+    processor = PIRProcessor(initialBaseline=initialBaseline, windowTime=windowSeconds)
+    timestamps = pirData["time_s"].to_numpy(dtype=np.float64)
+    voltages = pirData["voltage"].to_numpy(dtype=np.float64)
+    relative = np.empty_like(voltages)
+
+    for index, (timestamp, voltage) in enumerate(zip(timestamps, voltages)):
+        relative[index] = processor.processSample(timestamp, voltage)
+
+    return timestamps, relative
+
+
 # Debug
 if __name__ == "__main__":
     from PIR.interface import PIRAcquisition, sampleRateHz
@@ -203,8 +218,7 @@ if __name__ == "__main__":
 
     processor = PIRProcessor(sample_queue)
 
-    print("Keep the scene empty during background calibration.")
-    print("Threshold default is not calibrated for this PCB.")
+    print("Calibrating")
     acquisition.start()
     processor.start()
 
@@ -218,16 +232,3 @@ if __name__ == "__main__":
         processor.stop()
         acquisition.stop()
         print("\nStopped.")
-
-
-# Offline PIR signal preprocessing; uses the same PIRProcessor as live sampling
-def preprocessPIR(pirData, initialBaseline, windowSeconds):
-    processor = PIRProcessor(initialBaseline=initialBaseline, windowTime=windowSeconds)
-    timestamps = pirData["time_s"].to_numpy(dtype=np.float64)
-    voltages = pirData["voltage"].to_numpy(dtype=np.float64)
-    relative = np.empty_like(voltages)
-
-    for index, (timestamp, voltage) in enumerate(zip(timestamps, voltages)):
-        relative[index] = processor.processSample(timestamp, voltage)
-
-    return timestamps, relative

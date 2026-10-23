@@ -6,8 +6,8 @@ import time
 
 from PIR.interface import PIRAcquisition, sampleRateHz
 from PIR.processing import PIRProcessor
-import Thermopile.processing as thermopile
-from Thermopile.interface import REFRESH_RATE_HZ
+from Thermopile.processing import ThermopilePipeline
+from Thermopile.interface import REFRESH_RATE_HZ, getFrame, getCalibrationFrames
 from Collection.protocol import (
     CMD_START_AT,
     CMD_STOP,
@@ -37,6 +37,10 @@ from Collection.protocol import (
 
 THERMAL_RATE_HZ = REFRESH_RATE_HZ
 
+# Thermopile Background Calibration
+N_WARMUP_FRAMES = 20
+CALIBRATION_SECONDS = 10
+
 # Converts Dictionary to JSON and Sends
 def sendJson(conn, payload, sendLock):
     line = json.dumps(payload, separators=(",", ":")) + "\n"
@@ -53,7 +57,7 @@ def drainQueue(q):
             return
 
 
-def calibrationData(processor, status):
+def calibrationData(processor, thermalPipeline, status):
     payload = {
         KEY_STATUS: status,
         KEY_ROCK_TIME: time.time(),
@@ -64,9 +68,9 @@ def calibrationData(processor, status):
 
     payload.update(
         {
-            KEY_THERMAL_FRAME_SHAPE: list(thermopile.FRAME_SHAPE),
-            KEY_THERMAL_BACKGROUND: thermopile.getBackground().reshape(-1).astype(float).tolist(),
-            KEY_THERMAL_SIGMA: thermopile.getSigma().reshape(-1).astype(float).tolist(),
+            KEY_THERMAL_FRAME_SHAPE: list(thermalPipeline.frame_shape),
+            KEY_THERMAL_BACKGROUND: thermalPipeline.bg_model.bg.reshape(-1).astype(float).tolist(),
+            KEY_THERMAL_SIGMA: thermalPipeline.bg_model.sigma.reshape(-1).astype(float).tolist(),
         }
     )
     return payload
@@ -109,7 +113,7 @@ def thermopileStreamLoop(conn, stopEvent, sendLock):
     while not stopEvent.is_set():
         # A thermopile outage must not terminate the PIR recording.
         try:
-            rawFrame = thermopile.getRawFrame()
+            rawFrame = getFrame()
         except Exception as exc:
             print(f"Thermopile read failed: {exc}; retrying", flush=True)
             time.sleep(0.5)
@@ -199,7 +203,8 @@ def waitUntilRockTime(targetTime):
 
 def main():
     print("Warming up thermopile")
-    thermopile.warmUp()
+    thermalPipeline = ThermopilePipeline()
+    thermalPipeline.calibrate(getCalibrationFrames(N_WARMUP_FRAMES))
 
 
     print("Starting PIR")
@@ -228,9 +233,9 @@ def main():
 
             with conn:
                 print("Calibrating sensors - Make Sure No One Is In Frame")
-                thermopile.calibrate()
+                thermalPipeline.calibrate(getCalibrationFrames(CALIBRATION_SECONDS * THERMAL_RATE_HZ))
                 print("Calibration complete")
-                sendJson(conn, calibrationData(processor, STATUS_READY), sendLock)
+                sendJson(conn, calibrationData(processor, thermalPipeline, STATUS_READY), sendLock)
 
                 startPayload = waitForCommand(conn, CMD_START_AT, sendLock)
                 if startPayload is None:
@@ -242,7 +247,7 @@ def main():
 
                 drainQueue(processor.outputQueue)
                 stopEvent = threading.Event()
-                sendJson(conn, calibrationData(processor, STATUS_RECORDING), sendLock)
+                sendJson(conn, calibrationData(processor, thermalPipeline, STATUS_RECORDING), sendLock)
 
                 pirThread = threading.Thread(
                     target=pirStreamLoop,
