@@ -1,0 +1,95 @@
+EVALUATION REPORT: GB_Train_5p0s
+Trained on Datasets\training, evaluated on Datasets\validation (5 s window). Alarm thresholds tuned on this data, so these numbers are optimistic.
+Pd: INTRUDER at least once within 10 s of a labelled entry (event based).
+Pfa: MAYBE/INTRUDER with nobody inbound or outbound, or INTRUDER with a person only outbound;
+     percentage of non-human fusion intervals (not alarms per hour).
+Accuracy: alert (MAYBE or INTRUDER) vs inbound label per fusion interval.
+Improvements are relative to the thresholded PIR: Pd improvement = (fused - PIR) / PIR,
+     Pfa reduction = (PIR - fused) / PIR, accuracy gain = (fused - PIR) / PIR.
+Spec 1: accuracy gain >= 20% and false alarm reduction >= 50% over PIR.
+Spec 4: every entry alarmed (INTRUDER) within 10 s.
+Specs 2 and 3 (range 1-10 m, speed 0.2-5 m/s): see the per-recording table on the testing set.
+First-principles vs scikit-learn GB confidence correlation: 0.99999
+First-principles vs scikit-learn GB confidence difference: mean 1.97e-05, max 7.81e-02
+Exported model: Processed\realtime\fusion_gb.json
+
+ALARM THRESHOLDS
+System                     | maybe enter/exit | intruder enter/exit | off-delay s
+First-principles GB        |    0.650/0.500 |         0.750/0.700 | 0.0
+scikit-learn GB            |    0.650/0.500 |         0.750/0.700 | 0.0
+
+REQUIREMENTS (project proposal)
+System                     |   Pd % |  Pfa % |  Acc % | Acc gain % | Pfa red % |  <=10 s | Mean s | Max s | Spec 1 acc  Spec 1 FA  Spec 4
+----------------------------------------------------------------------------------------------------------------------------------------
+Thresholded PIR            |  96.43 |  23.95 |  67.33 |          - |         - |   81/84 |   0.34 |   5.4 |          -          -    FAIL
+First-principles GB        | 100.00 |   4.50 |  87.27 |      29.62 |     81.22 |   84/84 |   1.14 |  10.0 |       PASS       PASS    PASS
+scikit-learn GB            | 100.00 |   4.50 |  87.27 |      29.62 |     81.22 |   84/84 |   1.14 |  10.0 |       PASS       PASS    PASS
+Entries evaluated: 84. <=10 s = entries alarmed (INTRUDER) within 10 s.
+
+WARD-STYLE EVENT QUALITY (INTRUDER output)
+C=correct 1:1, D=missed, F=fragmented, M=merged, FM=both, I=inserted false alarm.
+Fresh Pd: new OFF->ON alarm within 10 s of entry (events already in alarm excluded).
+System                     |    C |    D |    F |    M |   FM |    I | Fresh Pd | Delay s
+--------------------------------------------------------------------------------------------
+Thresholded PIR            |   27 |    0 |   41 |    7 |   10 |  131 |    21.43 |    1.38
+First-principles GB        |   41 |    0 |   38 |    2 |    4 |   26 |    86.90 |    1.26
+scikit-learn GB            |   41 |    0 |   38 |    2 |    4 |   26 |    86.90 |    1.26
+
+FALSE-ALARM BREAKDOWN
+edge = within 3 s of a labelled person (inbound or outbound): alarm lingering or starting early at an event boundary; isolated = everything else.
+Recording              |                Thresholded PIR |            First-principles GB |                scikit-learn GB
+----------------------------------------------------------------------------------------------------------------------------
+CefimValid1            |            0 edge    0 iso (-) |            0 edge    0 iso (-) |            0 edge    0 iso (-)
+CefimValid7            |   240 edge   21 iso (92% edge) |    38 edge    8 iso (83% edge) |    38 edge    8 iso (83% edge)
+HomeDadValid           |    58 edge    6 iso (91% edge) |    5 edge    0 iso (100% edge) |    5 edge    0 iso (100% edge)
+HomeGardenDadValid     |    53 edge    2 iso (96% edge) |   17 edge    0 iso (100% edge) |   17 edge    0 iso (100% edge)
+HomeGardenMe           |    52 edge   36 iso (59% edge) |     8 edge    2 iso (80% edge) |     8 edge    2 iso (80% edge)
+HomeGardenTam          |    58 edge   12 iso (83% edge) |    17 edge    6 iso (74% edge) |    17 edge    6 iso (74% edge)
+HomeMeTest             |    91 edge    1 iso (99% edge) |            0 edge    0 iso (-) |            0 edge    0 iso (-)
+HomeTamValid           |    73 edge   16 iso (82% edge) |    31 edge    3 iso (91% edge) |    31 edge    3 iso (91% edge)
+ALL                    |   625 edge   94 iso (87% edge) |   116 edge   19 iso (86% edge) |   116 edge   19 iso (86% edge)
+
+PER RECORDING
+Detected = INTRUDER within 10 s of entry; FA = false-alarm intervals / non-human intervals
+Recording              | Events | Thresholded PIR det |  Thresholded PIR FA | First-principles GB det |  First-principles GB FA | scikit-learn GB det |  scikit-learn GB FA
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+CefimValid1            |      0 |                   0 |                0/60 |                       0 |                    0/60 |                   0 |                0/60
+CefimValid7            |     29 |                  27 |            261/1231 |                      29 |                 46/1231 |                  29 |             46/1231
+HomeDadValid           |     10 |                  10 |              64/233 |                      10 |                   5/233 |                  10 |               5/233
+HomeGardenDadValid     |      7 |                   7 |              55/118 |                       7 |                  17/118 |                   7 |              17/118
+HomeGardenMe           |      6 |                   6 |              88/313 |                       6 |                  10/313 |                   6 |              10/313
+HomeGardenTam          |      9 |                   8 |              70/324 |                       9 |                  23/324 |                   9 |              23/324
+HomeMeTest             |     10 |                  10 |              92/264 |                      10 |                   0/264 |                  10 |               0/264
+HomeTamValid           |     13 |                  13 |              89/459 |                      13 |                  34/459 |                  13 |              34/459
+
+FEATURE IMPORTANCE (first-principles Gradient Boosting, share of squared-error reduction)
+thermalCentroidCol                    26.43%
+thermalCentroidRow                     9.98%
+thermalFdWindowMaxEnergy               8.09%
+thermalMaxZ                            7.96%
+pirPositivePeak                        5.90%
+thermalSceneTemperature                5.27%
+thermalFdWindowMeanEnergy              4.00%
+pirNegativePeak                        3.84%
+thermalMaxBlobAgeFrames                3.43%
+thermalMaxBlobTemperatureDifference    3.32%
+thermalMaxBlobTraversed                2.87%
+pirPeakSeparation                      2.87%
+pirActivityDuration                    2.54%
+pirPeakToPeak                          2.50%
+thermalTrackAgeFrames                  1.83%
+thermalTotalForegroundPixels           1.78%
+thermalPixelCount                      1.48%
+thermalMaxBlobPixelCount               1.40%
+thermalMaxBlobSpeed                    1.32%
+thermalNumberOfBlobs                   0.98%
+pirRms                                 0.94%
+thermalMaxTemperatureDifference        0.76%
+thermalFdMaxAbs                        0.27%
+thermalCentroidSpeed                   0.17%
+thermalFdMeanAbs                       0.05%
+thermalMovingBlobCount                 0.00%
+thermalFdWindowActiveFraction          0.00%
+thermalFdValid                         0.00%
+thermalFdActivePixels                  0.00%
+thermalFdEnergy                        0.00%

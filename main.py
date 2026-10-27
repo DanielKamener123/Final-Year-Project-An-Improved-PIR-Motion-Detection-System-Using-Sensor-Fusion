@@ -1,5 +1,6 @@
 """Start the complete live sensor-fusion system on the ROCK 4C+."""
 import argparse
+import csv
 import queue
 import threading
 import time
@@ -13,6 +14,19 @@ from PIR.processing import PIRProcessor, warmupTime
 from Thermopile.interface import getFrame, REFRESH_RATE_HZ
 from Thermopile.processing import ThermopilePipeline
 from Fusion.realtimeModel import RealtimeModel
+
+# Live calibration matches the recordings (Collection/rock_agent.py): the first
+# N_WARMUP_FRAMES frames after start-up are thrown away, then the background and
+# sigma come from CALIBRATION_SECONDS * THERMAL_RATE_HZ = 10 * 4 = 40 frames.
+# Same number of frames -> same sigma estimate -> same z values as the training data.
+CALIBRATION_DISCARD_FRAMES = 20
+CALIBRATION_FRAMES = 40
+
+# Live log: one row per fused decision (both systems from the same acquisition,
+# plus the processing time used for the response-time test)
+LOG_FOLDER = Path("Processed/live_logs")
+LOG_COLUMNS = ["timestamp", "pir_state", "fusion_state", "fusion_confidence",
+               "pir_relative_voltage", "processing_ms"]
 
 class StateLights(ttk.LabelFrame):
     """Three explicit lights; only the currently reported state is illuminated."""
@@ -105,7 +119,7 @@ class LiveGUI:
 
 class RealTimeSystem:
     def __init__(self, folder):
-        self.model = RealtimeModel(folder / "fusion_rf.json")
+        self.model = RealtimeModel(folder / "fusion_gb.json")
         self.window = self.model.window
         self.acquisitionQueue = queue.Queue(maxsize=4096)
         self.pirAcquisition = PIRAcquisition(self.acquisitionQueue)
@@ -115,6 +129,9 @@ class RealTimeSystem:
         self.lock = threading.Lock()
         self.latest = {"warmup": "Preparing sensors...", "status": "Starting"}
         self.worker = threading.Thread(target=self.run_thermal, daemon=True)
+        # Decision log (opened once the system is ready)
+        self.logFile = None
+        self.logWriter = None
 
     def publish(self, **updates):
         with self.lock:
@@ -133,6 +150,32 @@ class RealTimeSystem:
         self.stopEvent.set()
         self.pirAcquisition.stop()
         self.pirProcessor.stop()
+        self.closeLog()
+
+    # Opens A New CSV Log For This Run (never overwrites an earlier run)
+    def openLog(self):
+        LOG_FOLDER.mkdir(parents=True, exist_ok=True)
+        path = LOG_FOLDER / time.strftime("live_%Y%m%d_%H%M%S.csv")
+        self.logFile = open(path, "w", newline="", encoding="utf-8")
+        self.logWriter = csv.writer(self.logFile)
+        self.logWriter.writerow(LOG_COLUMNS)
+        self.logFile.flush()
+        return path
+
+    # Writes One Decision; flushed every row so a crash keeps everything logged so far
+    def logDecision(self, timestamp, result, processingMs):
+        if self.logWriter is None:
+            return
+        self.logWriter.writerow([f"{timestamp:.3f}", result["pir_state"], result["fusion_state"],
+                                 f"{result['fusion_confidence']:.4f}", f"{result['pir_relative_voltage']:.4f}",
+                                 f"{processingMs:.2f}"])
+        self.logFile.flush()
+
+    def closeLog(self):
+        if self.logFile is not None:
+            self.logFile.close()
+            self.logFile = None
+            self.logWriter = None
 
     def run_thermal(self):
         try:
@@ -145,20 +188,28 @@ class RealTimeSystem:
     def _run_thermal(self):
         # Calibrate the PIR baseline and thermal background with an empty detection zone.
         # Collect thermal calibration frames concurrently with the PIR warm-up.
+        # Start-up frames are discarded first, then CALIBRATION_FRAMES frames are kept
+        # (same as the recordings). The PIR warm-up runs at the same time.
         calibrations = []
-        start = time.monotonic()
-        warm_seconds = max(float(warmupTime) + 1, 20.0 / REFRESH_RATE_HZ)
+        discarded = 0
         while not self.stopEvent.is_set():
             frame = np.asarray(getFrame(), dtype=np.float64).reshape(24, 32)
-            calibrations.append(frame)
-            remaining = max(0, int(round(warm_seconds - (time.monotonic() - start))))
-            self.publish(warmup=f"WARM-UP: {remaining}s remaining — keep detection zone empty",
-                         status=f"Calibrating PIR and thermopile · {len(calibrations)} thermal frames")
-            if time.monotonic() - start >= warm_seconds and self.pirProcessor.initialised and len(calibrations) >= 20:
+            if discarded < CALIBRATION_DISCARD_FRAMES:
+                discarded += 1
+                self.publish(warmup="WARM-UP: sensor settling — keep detection zone empty",
+                             status=f"Discarding start-up frames · {discarded}/{CALIBRATION_DISCARD_FRAMES}")
+                continue
+            if len(calibrations) < CALIBRATION_FRAMES:
+                calibrations.append(frame)
+            self.publish(warmup="WARM-UP: calibrating — keep detection zone empty",
+                         status=f"Calibrating thermopile · {len(calibrations)}/{CALIBRATION_FRAMES} frames"
+                                + ("" if self.pirProcessor.initialised else " · PIR warming up"))
+            if len(calibrations) >= CALIBRATION_FRAMES and self.pirProcessor.initialised:
                 break
         if self.stopEvent.is_set():
             return
         self.thermal.calibrate(calibrations)
+        logPath = self.openLog()
         # Require a fresh full PIR window after both calibrations are finished.
         ready_at = time.time() + self.window
         self.publish(warmup="Thermopile and PIR calibrated; filling PIR history...",
@@ -182,8 +233,10 @@ class RealTimeSystem:
                 self.publish(pir_state="UNAVAILABLE", fusion_state="UNAVAILABLE", status=problem)
                 continue
             elapsed_ms = (time.monotonic() - started) * 1000.0
+            self.logDecision(timestamp, result, elapsed_ms)
             self.publish(warmup="READY — both sensors calibrated", **result,
-                         status=f"PIR {sampleRateHz} Hz target · Thermal {REFRESH_RATE_HZ:g} Hz target · Processing {elapsed_ms:.1f} ms")
+                         status=f"PIR {sampleRateHz} Hz target · Thermal {REFRESH_RATE_HZ:g} Hz target · "
+                                f"Processing {elapsed_ms:.1f} ms · Logging to {logPath.name}")
 
 
 def main():

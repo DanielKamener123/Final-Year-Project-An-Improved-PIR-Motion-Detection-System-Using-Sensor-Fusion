@@ -1,0 +1,90 @@
+EVALUATION REPORT: T3 QT1 details
+QT1 recordings only (seen site, day).
+Pd: INTRUDER at least once within 10 s of a labelled entry (event based).
+Pfa: MAYBE/INTRUDER with nobody inbound or outbound, or INTRUDER with a person only outbound;
+     percentage of non-human fusion intervals (not alarms per hour).
+Accuracy: alert (MAYBE or INTRUDER) vs inbound label per fusion interval.
+Improvements are relative to the thresholded PIR: Pd improvement = (fused - PIR) / PIR,
+     Pfa reduction = (PIR - fused) / PIR, accuracy gain = (fused - PIR) / PIR.
+Requirement 1: accuracy gain >= 20% and false alarm reduction >= 50% over PIR.
+Requirement 4: every entry alarmed (INTRUDER) within 10 s.
+Requirements 2 and 3 (range 1-10 m, speed 0.2-5 m/s): see the per-recording table on the testing set.
+
+ALARM THRESHOLDS
+System                     | maybe enter/exit | intruder enter/exit | off-delay s
+Fused system               |    0.650/0.500 |         0.750/0.700 | 0.0
+
+REQUIREMENTS (project proposal)
+System                     |   Pd % |  Pfa % |  Acc % | Acc gain % | Pfa red % |  <=10 s | Mean s | Max s | Req 1 acc   Req 1 FA   Req 4
+----------------------------------------------------------------------------------------------------------------------------------------
+Thresholded PIR            |  92.86 |  12.62 |  66.26 |          - |         - |   52/56 |   0.55 |   6.1 |          -          -    FAIL
+Fused system               |  89.29 |   2.52 |  83.82 |      26.49 |     80.00 |   50/56 |   2.18 |   7.7 |       PASS       PASS    FAIL
+Entries evaluated: 56. <=10 s = entries alarmed (INTRUDER) within 10 s.
+
+WARD-STYLE EVENT QUALITY (INTRUDER output)
+C=correct 1:1, D=missed, F=fragmented, M=merged, FM=both, I=inserted false alarm.
+Fresh Pd: new OFF->ON alarm within 10 s of entry (events already in alarm excluded).
+Overfill = INTRUDER time outside a matched entry; underfill = time inside a detected entry without INTRUDER (mean per detected entry).
+System                     |    C |    D |    F |    M |   FM |    I | Fresh Pd | Delay s | Overfill s | Underfill s
+------------------------------------------------------------------------------------------------------------------------
+Thresholded PIR            |   24 |    0 |   32 |    0 |    0 |  173 |    50.00 |    0.91 |       1.95 |       14.00
+Fused system               |   26 |    4 |   26 |    0 |    0 |   22 |    75.00 |    2.52 |       0.22 |       10.70
+
+FALSE-ALARM BREAKDOWN
+edge = within 3 s of a labelled person (inbound or outbound): alarm lingering or starting early at an event boundary; isolated = everything else.
+Recording              |                Thresholded PIR |                   Fused system
+-------------------------------------------------------------------------------------------
+Garden_10m_Day         |     7 edge    5 iso (58% edge) |     5 edge    2 iso (71% edge)
+Garden_1m_Day          |    86 edge   15 iso (85% edge) |     5 edge    2 iso (71% edge)
+Garden_4m_Day          |   130 edge   31 iso (81% edge) |    41 edge   28 iso (59% edge)
+Garden_6m_Day          |    40 edge   19 iso (68% edge) |    2 edge    0 iso (100% edge)
+Garden_8m_Day          |    12 edge   15 iso (44% edge) |      0 edge    1 iso (0% edge)
+Garden_Edge+55_Day     |    12 edge   15 iso (44% edge) |      0 edge    1 iso (0% edge)
+Garden_Edge-55_Day     |    40 edge   19 iso (68% edge) |    2 edge    0 iso (100% edge)
+Garden_Empty_Day       |      0 edge   29 iso (0% edge) |      0 edge    6 iso (0% edge)
+ALL                    |   327 edge  148 iso (69% edge) |    55 edge   40 iso (58% edge)
+
+PER RECORDING
+Detected = INTRUDER within 10 s of entry; FA = false-alarm intervals / non-human intervals
+Recording              | Events | Thresholded PIR det |  Thresholded PIR FA | Fused system det |  Fused system FA
+-----------------------------------------------------------------------------------------------------------------
+Garden_10m_Day         |      6 |                   5 |              12/291 |                5 |            7/291
+Garden_1m_Day          |     12 |                  12 |             101/521 |               10 |            7/521
+Garden_4m_Day          |     12 |                  11 |             161/755 |                9 |           69/755
+Garden_6m_Day          |      7 |                   6 |              59/370 |                7 |            2/370
+Garden_8m_Day          |      6 |                   6 |              27/371 |                6 |            1/371
+Garden_Edge+55_Day     |      6 |                   6 |              27/371 |                6 |            1/371
+Garden_Edge-55_Day     |      7 |                   6 |              59/370 |                7 |            2/370
+Garden_Empty_Day       |      0 |                   0 |              29/715 |                0 |            6/715
+
+FEATURE IMPORTANCE (first-principles Gradient Boosting, share of squared-error reduction)
+thermalCentroidCol                    26.43%
+thermalCentroidRow                     9.98%
+thermalFdWindowMaxEnergy               8.09%
+thermalMaxZ                            7.96%
+pirPositivePeak                        5.90%
+thermalSceneTemperature                5.27%
+thermalFdWindowMeanEnergy              4.00%
+pirNegativePeak                        3.84%
+thermalMaxBlobAgeFrames                3.43%
+thermalMaxBlobTemperatureDifference    3.32%
+thermalMaxBlobTraversed                2.87%
+pirPeakSeparation                      2.87%
+pirActivityDuration                    2.54%
+pirPeakToPeak                          2.50%
+thermalTrackAgeFrames                  1.83%
+thermalTotalForegroundPixels           1.78%
+thermalPixelCount                      1.48%
+thermalMaxBlobPixelCount               1.40%
+thermalMaxBlobSpeed                    1.32%
+thermalNumberOfBlobs                   0.98%
+pirRms                                 0.94%
+thermalMaxTemperatureDifference        0.76%
+thermalFdMaxAbs                        0.27%
+thermalCentroidSpeed                   0.17%
+thermalFdMeanAbs                       0.05%
+thermalMovingBlobCount                 0.00%
+thermalFdWindowActiveFraction          0.00%
+thermalFdValid                         0.00%
+thermalFdActivePixels                  0.00%
+thermalFdEnergy                        0.00%

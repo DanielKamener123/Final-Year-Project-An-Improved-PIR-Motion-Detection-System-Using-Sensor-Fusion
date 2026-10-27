@@ -79,8 +79,13 @@ AVG_WINDOW_S = 0.6        # 3 frames at 4 Hz, 2 frames at 2 Hz
 CONFIRM_M = 2
 CONFIRM_WINDOW_S = 0.6
 STRONG_RATIO = 1.5        # Peak score >= 1.5 x its threshold -> report immediately
-CONFIRM_MAX_STEP_PX = 3.0 # A faint blob only counts as "seen again" if it is
+CONFIRM_MAX_STEP_PX = 9.0 # A faint blob only counts as "seen again" if it is
                           # within this distance of its track's last centre
+
+# CONFIRM_MAX_STEP_PX now equals max_match_distance (9 px): "seen again" means the
+# same as "matched by the tracker". At 2 frames/s a person running at 4 m moves
+# about 10 px per frame, so the old 3 px limit reset their confirmation every
+# frame and fast walkers never became a reported blob.
 
 # Fix 7 - Tracker gate grows with blob size (near people are big and fast)
 GATE_PER_SQRT_PX = 2.5    # gate = max(max_match_distance, 2.5 * sqrt(pixels))
@@ -449,7 +454,9 @@ def getThermalFeatureNames():
     "thermalNumberOfBlobs",
     "thermalTotalForegroundPixels",
     "thermalMaxZ",
-    "thermalSceneTemperature",
+    # thermalSceneTemperature is no longer a model input: it changes with the day
+    # and time of recording, so the classifier learned recording conditions
+    # instead of human presence. It is still computed for the display.
     # Primary (most-travelled) blob
     "thermalPixelCount",
     "thermalCentroidRow",

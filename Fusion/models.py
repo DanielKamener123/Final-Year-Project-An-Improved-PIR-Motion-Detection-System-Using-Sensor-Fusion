@@ -4,7 +4,7 @@ For every fusion window, every classifier is trained on the training
 recordings and evaluated on the validation recordings against the thresholded
 PIR. Each classifier gets its own alarm thresholds, tuned on validation, so the
 comparison is fair. The best configuration is then trained from first
-principles (Fusion/randomForest.py) by offlineRun.py --train.
+principles (Fusion/gradientBoosting.py) by offlineRun.py --train.
 """
 import numpy as np
 import pandas as pd
@@ -77,7 +77,7 @@ def buildModels():
         ),
         "Gradient Boosting": make_pipeline(
             *treePreprocessing,
-            GradientBoostingClassifier(n_estimators=100, random_state=RANDOM_STATE),
+            GradientBoostingClassifier(n_estimators=100, min_samples_leaf=20, random_state=RANDOM_STATE),
         ),
     }
 
@@ -130,13 +130,20 @@ def compareModels(trainingPath, validationPath, windows=WINDOWS, progress=print)
     return pd.DataFrame(rows)
 
 
+# Worst-case detection delay allowed when selecting a configuration: a margin on
+# the 10 s requirement so that one slow entry does not fail Spec 4
+SELECTION_MAX_DELAY_S = 8.0
+
+
 # Best Fused Configuration: most requirement checks met (Spec 1 accuracy,
-# Spec 1 false alarms, Spec 4 response), then most entries alarmed within 10 s,
-# then highest accuracy gain, then highest false alarm reduction
+# Spec 1 false alarms, Spec 4 response), then worst-case delay within
+# SELECTION_MAX_DELAY_S, then highest false alarm reduction (accuracy gain is
+# almost the same for every tree model), then highest accuracy gain
 def bestConfiguration(results, system=None):
-    fused = results[results["System"] != PIR_SYSTEM]
+    fused = results[results["System"] != PIR_SYSTEM].copy()
     if system is not None:
         fused = fused[fused["System"] == system]
-    order = fused.sort_values(["Requirements Met", "Detected Events", "Accuracy Gain (%)", "Pfa Reduction (%)"],
+    fused["Delay Margin"] = fused["Max Delay (s)"] <= SELECTION_MAX_DELAY_S
+    order = fused.sort_values(["Requirements Met", "Delay Margin", "Pfa Reduction (%)", "Accuracy Gain (%)"],
                               ascending=[False, False, False, False], kind="stable")
     return order.iloc[0]

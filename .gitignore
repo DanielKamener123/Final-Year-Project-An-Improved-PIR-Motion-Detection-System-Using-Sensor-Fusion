@@ -4,3 +4,4 @@ __pycache__/
 *.py[cod]
 
 Processed/**/*.png
+Processed/**/*.tex

@@ -5,7 +5,7 @@ Run from the project root:
 
 Use this if the hardware fails during the demo. Every frame is processed while it
 plays, exactly as main.py does on the ROCK: the same ThermopilePipeline,
-PIRProcessor, first-principles Random Forest and three-state machine
+PIRProcessor, first-principles Gradient Boosting and three-state machine
 (Fusion/realtimeModel.py). Nothing is pre-computed. The recording supplies the
 sensor samples and the background calibration saved during collection.
 
@@ -41,7 +41,7 @@ from Tools.synchronised_playback import (
 )
 
 WINDOW_TITLE = "Intrusion Detection - Recorded Demo"
-MODEL_PATH = Path("Processed/realtime/fusion_rf.json")
+MODEL_PATH = Path("Processed/realtime/fusion_gb.json")
 TOP_H = 440
 CONFIDENCE_HISTORY_S = 20.0
 

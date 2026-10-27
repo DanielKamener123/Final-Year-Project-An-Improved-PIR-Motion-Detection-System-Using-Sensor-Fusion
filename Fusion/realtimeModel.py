@@ -1,9 +1,9 @@
-"""Real-time model: first-principles Random Forest + three-state alarm machine."""
+"""Real-time model: first-principles Gradient Boosting + three-state alarm machine."""
 import time
 import numpy as np
 from PIR.processing import threshold as PIR_THRESHOLD, getHistoryFeatureNames, getHistoryFeatureVector
 from Thermopile.processing import getThermalFeatureNames
-from Fusion.randomForest import RandomForest
+from Fusion.gradientBoosting import GradientBoosting
 
 STATES = ("NO INTRUDER", "MAYBE INTRUDER", "INTRUDER")
 NO_INTRUDER, MAYBE_INTRUDER, INTRUDER = 0, 1, 2
@@ -51,7 +51,7 @@ class StateMachine:
 class RealtimeModel:
     def __init__(self, fusion_path):
         # PIR-only is a fixed signal threshold, NOT a trained model.
-        self.fusion = RandomForest.load(fusion_path)
+        self.fusion = GradientBoosting.load(fusion_path)
         self.fusion_state = StateMachine(self.fusion.thresholds)
         self.window = self.fusion.window
 

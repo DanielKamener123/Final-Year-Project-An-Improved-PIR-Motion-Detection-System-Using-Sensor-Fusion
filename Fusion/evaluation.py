@@ -22,6 +22,9 @@ Project definitions:
               F (fragmented), M (merged), FM (both), I (inserted false alarm).
               Fresh Pd: the alarm was OFF just before the entry and switches ON
               within MAX_DELAY_S while the person is present.
+  Overfill  = seconds of INTRUDER outside the labelled entry, for alarms that
+              overlap an entry (alarm starting early or lingering after exit).
+  Underfill = seconds inside a detected (not missed) entry without INTRUDER.
   Improvements over thresholded PIR are relative:
               Pd improvement = (fused - PIR) / PIR x 100
               Pfa reduction  = (PIR - fused) / PIR x 100
@@ -151,7 +154,32 @@ def wardCounts(times, truth, predicted):
                 counts["Fresh"] += 1
                 delays.append(float(times[i] - times[a]))
                 break
+    # Overfill / underfill (seconds): alarm time outside a matched entry, and
+    # entry time without an alarm inside a detected (not missed) entry
+    durations = intervalDurations(times)
+    truth = np.asarray(truth, dtype=bool)
+    predicted = np.asarray(predicted, dtype=bool)
+    counts["Overfill"] = 0.0
+    counts["Underfill"] = 0.0
+    for pi, (c, d) in enumerate(predictedRuns):
+        if predictedToTruth[pi]:
+            counts["Overfill"] += float(durations[c:d + 1][~truth[c:d + 1]].sum())
+    for gi, (a, b) in enumerate(truthRuns):
+        if truthToPredicted[gi]:
+            counts["Underfill"] += float(durations[a:b + 1][~predicted[a:b + 1]].sum())
     return counts, delays
+
+
+# Time Each Fusion Interval Covers (s): gap to the next interval, with
+# recording gaps (> 1 s) and the last interval replaced by the typical spacing
+def intervalDurations(times):
+    times = np.asarray(times, dtype=float)
+    if len(times) < 2:
+        return np.zeros(len(times))
+    gaps = np.diff(times)
+    typical = float(np.median(gaps))
+    gaps = np.where(gaps > 1.0, typical, gaps)
+    return np.r_[gaps, typical]
 
 
 # Per-Recording Arrays, Prepared Once (threshold tuning re-uses them many times)
@@ -217,7 +245,7 @@ class Recordings:
     # Ward Metrics On The INTRUDER Output
     def ward(self, states):
         states = np.asarray(states, dtype=int)
-        totals = {key: 0 for key in WARD_KEYS + ("Eligible", "Fresh", "Preexisting")}
+        totals = {key: 0 for key in WARD_KEYS + ("Eligible", "Fresh", "Preexisting", "Overfill", "Underfill")}
         delays = []
         for r in self.items:
             counts, d = wardCounts(r["times"], r["human"] == 1, states[r["idx"]] == INTRUDER)
@@ -225,6 +253,12 @@ class Recordings:
                 totals[key] += counts[key]
             delays += d
         result = {f"Ward {key}": totals[key] for key in WARD_KEYS}
+        # Overfill / underfill in total and per detected (not missed) entry
+        matched = totals["C"] + totals["F"] + totals["M"] + totals["FM"]
+        result["Overfill (s)"] = float(totals["Overfill"])
+        result["Underfill (s)"] = float(totals["Underfill"])
+        result["Mean Overfill (s)"] = float(totals["Overfill"]) / matched if matched else np.nan
+        result["Mean Underfill (s)"] = float(totals["Underfill"]) / matched if matched else np.nan
         result["Ward Fresh Pd (%)"] = 100.0 * totals["Fresh"] / totals["Eligible"] if totals["Eligible"] else np.nan
         result["Ward Fresh Delay (s)"] = float(np.mean(delays)) if delays else np.nan
         result["Ward Preexisting"] = totals["Preexisting"]

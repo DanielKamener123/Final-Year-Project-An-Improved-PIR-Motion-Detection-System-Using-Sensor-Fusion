@@ -4,7 +4,7 @@ Run from your project root:
  python -m Tools.export_review_predictions                         (every validation and testing recording)
  python -m Tools.export_review_predictions --recording Datasets/validation/NAME
 
-Uses the most recently trained real-time model (Processed/realtime/fusion_rf.json,
+Uses the most recently trained real-time model (Processed/realtime/fusion_gb.json,
 written by offlineRun.py --train, which also runs this export automatically) with its
 frozen alarm thresholds, and writes review_predictions.csv into each recording. The
 playback tool then shows the model's confidence and state and can jump between false
@@ -18,22 +18,22 @@ import pandas as pd
 
 from Fusion.dataset import buildRecordingDataset, recordingFolders
 from Fusion.evaluation import addOutboundLabels, runStateMachine
-from Fusion.randomForest import RandomForest
+from Fusion.gradientBoosting import GradientBoosting
 
-MODEL_PATH = Path('Processed/realtime/fusion_rf.json')
+MODEL_PATH = Path('Processed/realtime/fusion_gb.json')
 REVIEW_SPLITS = [Path('Datasets/validation'), Path('Datasets/testing')]
 
 
 # Predictions For One Recording -> review_predictions.csv
-def exportRecording(forest, recording, output=None):
+def exportRecording(model, recording, output=None):
     recording = Path(recording)
     labelled = (recording / 'labels.csv').is_file()
-    data = buildRecordingDataset(recording, windowSeconds=forest.window, requireLabels=False)
+    data = buildRecordingDataset(recording, windowSeconds=model.window, requireLabels=False)
     if data is None or len(data) == 0:
         print(f'  {recording.name}: no usable fusion intervals, skipped')
         return None
-    score = forest.predictProba(data[forest.features].to_numpy(dtype=float))
-    state = runStateMachine(data, score, forest.thresholds)
+    score = model.predictProba(data[model.features].to_numpy(dtype=float))
+    state = runStateMachine(data, score, model.thresholds)
 
     out = pd.DataFrame({
         'time_s': data['fusionTime'].to_numpy(float),
@@ -63,11 +63,11 @@ def exportRecording(forest, recording, output=None):
 
 # Predictions For Every Validation And Testing Recording
 def exportAll(modelPath=MODEL_PATH, splits=REVIEW_SPLITS):
-    forest = RandomForest.load(modelPath)
-    print(f'Exporting review predictions with {modelPath} ({forest.window:g} s window)...')
+    model = GradientBoosting.load(modelPath)
+    print(f'Exporting review predictions with {modelPath} ({model.window:g} s window)...')
     for split in splits:
         for recording in recordingFolders(split):
-            exportRecording(forest, recording)
+            exportRecording(model, recording)
 
 
 def main():
@@ -85,7 +85,7 @@ def main():
         parser.error(f'Recording folder not found: {recording}')
     if 'training' in recording.parts:
         parser.error('Refusing to review a training recording. Use a validation/testing recording.')
-    exportRecording(RandomForest.load(args.model), recording, args.output)
+    exportRecording(GradientBoosting.load(args.model), recording, args.output)
 
 
 if __name__ == '__main__':

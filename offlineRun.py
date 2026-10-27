@@ -2,13 +2,18 @@
 
   python offlineRun.py --compare                 every scikit-learn classifier at every
                                                  window vs thresholded PIR (validation)
-  python offlineRun.py --train --window 1.5      train the first-principles Random Forest,
+  python offlineRun.py --train --window 1.0      train the first-principles Gradient Boosting,
                                                  tune its alarm thresholds on validation and
                                                  export it for the real-time system
   python offlineRun.py --test                    final verification of the exported model
                                                  on the testing recordings
+  python offlineRun.py --summary                 recordings, durations and labelled minutes
+                                                 of every split (Section 3 data paragraph)
 
 Each run writes report.txt and PNG figures to Processed/<name>/.
+--test also writes the Section 4 qualification tests: qt*.png figures and
+LaTeX tables (tables/*.tex). Testing folders must be named
+<Site>_<Test>_<Day|Night>, see Fusion/qualification.py.
 """
 from pathlib import Path
 import argparse
@@ -19,8 +24,9 @@ import numpy as np
 from Fusion.dataset import buildDataset, getFusedFeatureNames
 from Fusion.evaluation import (LABEL_COLUMN, addOutboundLabels, pirBaselineStates,
                                runStateMachine, tuneThresholds)
-from Fusion.randomForest import RandomForest
-from Fusion.report import writeComparisonReport, writeEvaluationReport
+from Fusion.gradientBoosting import GradientBoosting
+from Fusion.report import writeComparisonReport, writeEvaluationReport, figImplementationCheck
+from Fusion.qualification import writeQualificationReport, datasetSummary
 
 
 # Data Path
@@ -28,7 +34,7 @@ trainingDataset = Path("Datasets/training")
 validationDataset = Path("Datasets/validation")
 testingDataset = Path("Datasets/testing")
 outputPath = Path("Processed")
-modelPath = outputPath / "realtime" / "fusion_rf.json"
+modelPath = outputPath / "realtime" / "fusion_gb.json"
 
 
 # Output Folder Name For This Run (never overwrites an earlier run)
@@ -56,8 +62,8 @@ def runCompare(runName, folder):
     from Fusion.models import compareModels, bestConfiguration
     results = compareModels(trainingDataset, validationDataset)
     best = bestConfiguration(results)
-    bestForest = bestConfiguration(results, "Random Forest")
-    text = writeComparisonReport(runName, results, best, bestForest, folder, trainingDataset, validationDataset)
+    bestBoosting = bestConfiguration(results, "Gradient Boosting")
+    text = writeComparisonReport(runName, results, best, bestBoosting, folder, trainingDataset, validationDataset)
     print("\n" + text)
 
 
@@ -67,60 +73,72 @@ def runTrain(runName, folder, window):
     trainData = loadData(trainingDataset, window)
     evalData = loadData(validationDataset, window, evaluation=True)
 
-    print("Training the first-principles Random Forest...")
-    forest = RandomForest().fit(featureMatrix(trainData).to_numpy(), trainData[LABEL_COLUMN].to_numpy(),
-                                names, progress=print)
-    scores = forest.predictProba(featureMatrix(evalData).to_numpy())
+    print("Training the first-principles Gradient Boosting...")
+    model = GradientBoosting().fit(featureMatrix(trainData).to_numpy(), trainData[LABEL_COLUMN].to_numpy(),
+                                   names, progress=print)
+    scores = model.predictProba(featureMatrix(evalData).to_numpy())
     print("Tuning alarm thresholds on validation...")
     tuned = tuneThresholds(evalData, scores)
-    path = forest.save(modelPath, window, tuned["thresholds"])
+    path = model.save(modelPath, window, tuned["thresholds"])
     print(f"Saved real-time model to {path}")
     # Keep the playback review files in step with the newest model
     from Tools.export_review_predictions import exportAll
     exportAll(modelPath)
 
     # Same settings in scikit-learn, as a check on the first-principles implementation
-    print("Training the scikit-learn Random Forest for comparison...")
-    library = buildModels()["Random Forest"].fit(featureMatrix(trainData), trainData[LABEL_COLUMN])
+    print("Training the scikit-learn Gradient Boosting for comparison...")
+    library = buildModels()["Gradient Boosting"].fit(featureMatrix(trainData), trainData[LABEL_COLUMN])
     libraryScores = confidenceScores(library, featureMatrix(evalData))
     libraryThresholds = tuneThresholds(evalData, libraryScores)["thresholds"]
 
     systems = {
         "Thresholded PIR": {"states": pirBaselineStates(evalData)},
-        "First-principles RF": {"scores": scores, "thresholds": tuned["thresholds"],
+        "First-principles GB": {"scores": scores, "thresholds": tuned["thresholds"],
                                 "states": runStateMachine(evalData, scores, tuned["thresholds"])},
-        "scikit-learn RF": {"scores": libraryScores, "thresholds": libraryThresholds,
+        "scikit-learn GB": {"scores": libraryScores, "thresholds": libraryThresholds,
                             "states": runStateMachine(evalData, libraryScores, libraryThresholds)},
     }
     agreement = np.corrcoef(scores, libraryScores)[0, 1]
-    text, _ = writeEvaluationReport(
+    difference = np.abs(scores - libraryScores)
+    text, metrics = writeEvaluationReport(
         runName, evalData, systems, folder,
         f"Trained on {trainingDataset}, evaluated on {validationDataset} ({window:g} s window). "
         "Alarm thresholds tuned on this data, so these numbers are optimistic.",
         f"{window:g} s window, validation",
-        featureNames=names, importance=forest.importance,
-        extraLines=[f"First-principles vs scikit-learn RF confidence correlation: {agreement:.3f}",
+        featureNames=names, importance=model.importance,
+        extraLines=[f"First-principles vs scikit-learn GB confidence correlation: {agreement:.5f}",
+                    f"First-principles vs scikit-learn GB confidence difference: mean {difference.mean():.2e}, "
+                    f"max {difference.max():.2e}",
                     f"Exported model: {modelPath}"])
+    # Report figure for the real-time implementation check (Section 3)
+    figImplementationCheck(scores, libraryScores, metrics, "First-principles GB", "scikit-learn GB", folder)
     print("\n" + text)
 
 
 def runTest(runName, folder):
     if not modelPath.is_file():
         raise FileNotFoundError(f"No trained model at {modelPath}; run offlineRun.py --train first")
-    forest = RandomForest.load(modelPath)
-    evalData = loadData(testingDataset, forest.window, evaluation=True)
-    scores = forest.predictProba(evalData[forest.features].to_numpy(dtype=float))
-    systems = {
-        "Thresholded PIR": {"states": pirBaselineStates(evalData)},
-        "First-principles RF": {"scores": scores, "thresholds": forest.thresholds,
-                                "states": runStateMachine(evalData, scores, forest.thresholds)},
-    }
-    text, _ = writeEvaluationReport(
-        runName, evalData, systems, folder,
+    model = GradientBoosting.load(modelPath)
+    evalData = loadData(testingDataset, model.window, evaluation=True)
+    scores = model.predictProba(evalData[model.features].to_numpy(dtype=float))
+    # One run of the frozen model, split into the report's qualification tests
+    text = writeQualificationReport(
+        runName, evalData, scores, model, folder,
         f"FINAL VERIFICATION: exported model {modelPath} with frozen alarm thresholds, "
-        f"evaluated on {testingDataset} ({forest.window:g} s window).",
-        f"{forest.window:g} s window, testing",
-        featureNames=forest.features, importance=forest.importance)
+        f"evaluated on {testingDataset} ({model.window:g} s window).",
+        {"Training": trainingDataset, "Validation": validationDataset, "Testing": testingDataset})
+    print("\n" + text)
+
+
+def runSummary(runName, folder):
+    folder.mkdir(parents=True, exist_ok=False)
+    lines, table, tex = datasetSummary(
+        {"Training": trainingDataset, "Validation": validationDataset, "Testing": testingDataset})
+    text = "\n".join([f"DATASET SUMMARY: {runName}", *lines]) + "\n"
+    (folder / "report.txt").write_text(text, encoding="utf-8")
+    table.to_csv(folder / "recordings.csv", index=False)
+    if tex:
+        (folder / "data_split.tex").write_text(tex, encoding="utf-8")
     print("\n" + text)
 
 
@@ -131,10 +149,12 @@ if __name__ == "__main__":
     group.add_argument("--compare", action="store_true",
                        help="Compare every classifier at every window on the validation recordings")
     group.add_argument("--train", action="store_true",
-                       help="Train, tune and export the first-principles Random Forest")
+                       help="Train, tune and export the first-principles Gradient Boosting")
     group.add_argument("--test", action="store_true",
                        help=f"Final verification of {modelPath} on the testing recordings")
-    parser.add_argument("--window", type=float, default=1.5, help="Fusion window for --train (seconds)")
+    group.add_argument("--summary", action="store_true",
+                       help="Recordings, durations and labelled minutes of every dataset split")
+    parser.add_argument("--window", type=float, default=1.0, help="Fusion window for --train (seconds)")
     args = parser.parse_args()
 
     runName, folder = outputFolder(args.name)
@@ -142,6 +162,8 @@ if __name__ == "__main__":
         runCompare(runName, folder)
     elif args.train:
         runTrain(runName, folder, args.window)
+    elif args.summary:
+        runSummary(runName, folder)
     else:
         runTest(runName, folder)
     print(f"\nSaved report and figures to: {folder}")

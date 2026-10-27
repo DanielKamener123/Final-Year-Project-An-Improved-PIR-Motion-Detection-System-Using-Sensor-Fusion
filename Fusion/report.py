@@ -3,7 +3,7 @@
 writeComparisonReport  - offlineRun.py --compare: every classifier at every
                          window vs the thresholded PIR (validation recordings).
 writeEvaluationReport  - offlineRun.py --train / --test: one window, the
-                         first-principles Random Forest vs the thresholded PIR.
+                         first-principles Gradient Boosting vs the thresholded PIR.
 
 Metric definitions are in Fusion/evaluation.py.
 """
@@ -24,7 +24,8 @@ from Fusion.evaluation import (
 
 # Palette (validated reference categorical slots + neutral baseline)
 PIR_COLOUR = "#8a8984"
-SYSTEM_COLOURS = ["#2a78d6", "#eb6834", "#1f9e89", "#6250d6", "#d6409f", "#b8860b", "#3b3b3b"]
+# Okabe-Ito colour-blind safe palette: sky blue, orange, green, pink, vermillion, dark blue, black
+SYSTEM_COLOURS = ["#56B4E9", "#E69F00", "#009E73", "#CC79A7", "#D55E00", "#0072B2", "#000000"]
 INBOUND = "#2a78d6"
 OUTBOUND = "#eda100"
 TEXT = "#0b0b0b"
@@ -39,6 +40,22 @@ plt.rcParams.update({
     "axes.axisbelow": True, "legend.frameon": False, "savefig.dpi": 200,
 })
 
+# Report Figures: sized to the report text width (A4, 25 mm margins = 160 mm)
+# so the fonts print at about the report's font size when included at \linewidth.
+# Titles are left out because the LaTeX caption describes the figure.
+FIG_WIDTH = 6.3
+SHOW_TITLES = False
+
+
+def _title(ax, text, **kwargs):
+    if SHOW_TITLES:
+        ax.set_title(text, **kwargs)
+
+
+def _suptitle(fig, text, **kwargs):
+    if SHOW_TITLES:
+        fig.suptitle(text, **kwargs)
+
 WARD_NAMES = {"C": "Correct", "D": "Missed", "F": "Fragmented", "M": "Merged",
               "FM": "Frag.+merged", "I": "Inserted"}
 
@@ -49,9 +66,9 @@ DEFINITIONS = [
     "Accuracy: alert (MAYBE or INTRUDER) vs inbound label per fusion interval.",
     "Improvements are relative to the thresholded PIR: Pd improvement = (fused - PIR) / PIR,",
     "     Pfa reduction = (PIR - fused) / PIR, accuracy gain = (fused - PIR) / PIR.",
-    f"Spec 1: accuracy gain >= {TARGET_ACC_GAIN:g}% and false alarm reduction >= {TARGET_PFA_DROP:g}% over PIR.",
-    f"Spec 4: every entry alarmed (INTRUDER) within {MAX_DELAY_S:g} s.",
-    "Specs 2 and 3 (range 1-10 m, speed 0.2-5 m/s): see the per-recording table on the testing set.",
+    f"Requirement 1: accuracy gain >= {TARGET_ACC_GAIN:g}% and false alarm reduction >= {TARGET_PFA_DROP:g}% over PIR.",
+    f"Requirement 4: every entry alarmed (INTRUDER) within {MAX_DELAY_S:g} s.",
+    "Requirements 2 and 3 (range 1-10 m, speed 0.2-5 m/s): see the per-recording table on the testing set.",
 ]
 
 
@@ -81,7 +98,7 @@ def _pass(ok):
 # Comparison report (all classifiers x all windows)
 # ---------------------------------------------------------------------------
 
-def comparisonTable(results, best, bestForest):
+def comparisonTable(results, best, bestBoosting):
     lines = ["\nVALIDATION RESULTS - every system at every fusion window "
              "(alarm thresholds tuned per classifier on validation)",
              f"{'Win s':>5} | {'System':20s} | {'Pd %':>6} | {'Pfa %':>6} | {'Acc %':>6} | "
@@ -103,48 +120,48 @@ def comparisonTable(results, best, bestForest):
         return (f"{int(row['Requirements Met'])}/{checks} checks met, accuracy gain {row['Accuracy Gain (%)']:.1f}%, "
                 f"false alarm reduction {row['Pfa Reduction (%)']:.1f}%, "
                 f"{int(row['Detected Events'])}/{int(row['Events'])} entries within {MAX_DELAY_S:g} s")
-    lines += ["", f"Checks: Spec 1 accuracy gain, Spec 1 false alarm reduction, Spec 4 response time ({checks} in total).",
+    lines += ["", f"Checks: Requirement 1 accuracy gain, Requirement 1 false alarm reduction, Requirement 4 response time ({checks} in total).",
               f"BEST CONFIGURATION: {best['System']} at {best['Window (s)']:g} s ({summary(best)})",
-              f"BEST RANDOM FOREST WINDOW: {bestForest['Window (s)']:g} s ({summary(bestForest)})",
-              "Ranking: most checks met, then most entries alarmed within 10 s, then highest accuracy gain, "
-              "then highest false alarm reduction.",
-              "Train the Random Forest from first principles at that window with:",
-              f"    python offlineRun.py --train --window {bestForest['Window (s)']:g}"]
+              f"BEST GRADIENT BOOSTING WINDOW: {bestBoosting['Window (s)']:g} s ({summary(bestBoosting)})",
+              "Ranking: most checks met, then worst-case delay within 8 s, then highest false alarm reduction, "
+              "then highest accuracy gain.",
+              "Train the Gradient Boosting model from first principles at that window with:",
+              f"    python offlineRun.py --train --window {bestBoosting['Window (s)']:g}"]
     return lines
 
 
 def figComparison(results, metric, title, ylabel, target, targetKind, filename, out):
     systems = list(dict.fromkeys(results["System"]))
     colours = _colours(systems)
-    fig, ax = plt.subplots(figsize=(8, 4))
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, 3.4))
     for system in systems:
         sub = results[results["System"] == system].sort_values("Window (s)")
         if metric not in sub or sub[metric].isna().all():
             continue
         pir = system == "Thresholded PIR"
-        ax.plot(sub["Window (s)"], sub[metric], marker="o", markersize=4, linewidth=2,
-                color=colours[system], linestyle="--" if pir else "-", label=system)
+        ax.plot(sub["Window (s)"], sub[metric], marker="o", markersize=5,
+                linewidth=2, color=colours[system], linestyle="--" if pir else "-", label=system)
     if target is not None:
         ax.axhline(target, color=TEXT, linestyle=":", linewidth=1.2)
         ax.text(ax.get_xlim()[0], target, f" requirement {'≥' if targetKind == 'min' else '≤'} {target:g}%",
                 va="bottom", ha="left", color=TEXT_2, fontsize=8)
     ax.set_xlabel("Fusion window (s)")
     ax.set_ylabel(ylabel)
-    ax.set_title(title, loc="left", fontsize=10)
-    ax.legend(fontsize=8, ncol=2)
+    _title(ax, title, loc="left", fontsize=10)
+    ax.legend(fontsize=8, ncol=4, loc="upper center", bbox_to_anchor=(0.5, -0.18))
     fig.tight_layout()
-    fig.savefig(out / filename)
+    fig.savefig(out / filename, bbox_inches="tight")
     plt.close(fig)
 
 
-def writeComparisonReport(runName, results, best, bestForest, outDir, trainingPath, validationPath):
+def writeComparisonReport(runName, results, best, bestBoosting, outDir, trainingPath, validationPath):
     out = Path(outDir)
     out.mkdir(parents=True, exist_ok=False)
     lines = [f"MODEL AND WINDOW SELECTION: {runName}",
              f"Trained on {trainingPath}, evaluated on {validationPath}.",
              "Validation is used only to choose the classifier, window and alarm thresholds;",
              "the testing recordings give the verification result (offlineRun.py --test).", *DEFINITIONS]
-    lines += comparisonTable(results, best, bestForest)
+    lines += comparisonTable(results, best, bestBoosting)
     text = "\n".join(lines) + "\n"
     (out / "report.txt").write_text(text, encoding="utf-8")
     results.drop(columns=["Thresholds"], errors="ignore").to_csv(out / "comparison.csv", index=False)
@@ -161,7 +178,7 @@ def writeComparisonReport(runName, results, best, bestForest, outDir, trainingPa
 
 
 # ---------------------------------------------------------------------------
-# Evaluation report (one window, first-principles RF vs thresholded PIR)
+# Evaluation report (one window, first-principles GB vs thresholded PIR)
 # ---------------------------------------------------------------------------
 
 def requirementTable(metrics):
@@ -169,7 +186,7 @@ def requirementTable(metrics):
     lines = ["\nREQUIREMENTS (project proposal)",
              f"{'System':26s} | {'Pd %':>6} | {'Pfa %':>6} | {'Acc %':>6} | {'Acc gain %':>10} | "
              f"{'Pfa red %':>9} | {'<=10 s':>7} | {'Mean s':>6} | {'Max s':>5} | "
-             f"Spec 1 acc  Spec 1 FA  Spec 4",
+             f"Req 1 acc   Req 1 FA   Req 4",
              "-" * 136]
     for name, m in metrics.items():
         entries = f"{int(m['Detected Events'])}/{int(m['Events'])}"
@@ -204,11 +221,15 @@ def wardTable(metrics):
     lines = ["\nWARD-STYLE EVENT QUALITY (INTRUDER output)",
              "C=correct 1:1, D=missed, F=fragmented, M=merged, FM=both, I=inserted false alarm.",
              f"Fresh Pd: new OFF->ON alarm within {MAX_DELAY_S:g} s of entry (events already in alarm excluded).",
-             f"{'System':26s} | " + " | ".join(f"{k:>4}" for k in WARD_KEYS) + f" | {'Fresh Pd':>8} | {'Delay s':>7}",
-             "-" * 92]
+             "Overfill = INTRUDER time outside a matched entry; underfill = time inside a detected entry "
+             "without INTRUDER (mean per detected entry).",
+             f"{'System':26s} | " + " | ".join(f"{k:>4}" for k in WARD_KEYS) + f" | {'Fresh Pd':>8} | {'Delay s':>7}"
+             + f" | {'Overfill s':>10} | {'Underfill s':>11}",
+             "-" * 120]
     for name, m in metrics.items():
         lines.append(f"{name:26s} | " + " | ".join(f"{int(m[f'Ward {k}']):4d}" for k in WARD_KEYS)
-                     + f" | {_fmt(m['Ward Fresh Pd (%)'], 8)} | {_fmt(m['Ward Fresh Delay (s)'], 7)}")
+                     + f" | {_fmt(m['Ward Fresh Pd (%)'], 8)} | {_fmt(m['Ward Fresh Delay (s)'], 7)}"
+                     + f" | {_fmt(m['Mean Overfill (s)'], 10)} | {_fmt(m['Mean Underfill (s)'], 11)}")
     return lines
 
 
@@ -293,42 +314,45 @@ def falseAlarmTable(evalData, systems):
     return lines, breakdowns
 
 
-def figRequirements(metrics, colours, tag, out):
+def figRequirements(metrics, colours, tag, out, filename="requirements.png"):
     names = list(metrics)
     pdVals = [metrics[n]["Event Pd (%)"] for n in names]
     pfaVals = [metrics[n]["Pfa (%)"] for n in names]
-    fig, axes = plt.subplots(1, 2, figsize=(9, 3.8))
-    for ax, vals, title in [
-        (axes[0], pdVals, f"Event probability of detection (alarm within {MAX_DELAY_S:g} s)"),
-        (axes[1], pfaVals, "False alarm probability"),
+    fig, axes = plt.subplots(1, 2, figsize=(FIG_WIDTH, 3.0))
+    for ax, vals, title, ylabel in [
+        (axes[0], pdVals, f"Event probability of detection (alarm within {MAX_DELAY_S:g} s)",
+         "Event probability of detection (%)"),
+        (axes[1], pfaVals, "False alarm probability", "False alarm probability (%)"),
     ]:
         x = np.arange(len(names))
+        vals = [0.0 if not np.isfinite(v) else v for v in vals]
         ax.bar(x, vals, width=0.6, color=[colours[n] for n in names], edgecolor="white", linewidth=2)
         for xi, v in zip(x, vals):
             ax.text(xi, v, f"{v:.1f}%", ha="center", va="bottom", color=TEXT, fontsize=9)
-        ax.set_xticks(x, names, fontsize=8)
-        ax.set_ylabel("%")
-        ax.set_title(title, loc="left", fontsize=10)
+        ax.set_xticks(x, names, fontsize=9)
+        ax.set_ylabel(ylabel, fontsize=9)
+        _title(ax, title, loc="left", fontsize=10)
         ax.grid(axis="x", visible=False)
     axes[0].set_ylim(0, 105)
-    axes[1].set_ylim(0, max(pfaVals) * 1.25 + 1)
-    fig.suptitle(f"Fused system vs thresholded PIR ({tag})", x=0.01, ha="left", fontweight="bold", fontsize=11)
+    finitePfa = [v for v in pfaVals if np.isfinite(v)]
+    axes[1].set_ylim(0, (max(finitePfa) if finitePfa else 0) * 1.25 + 1)
+    _suptitle(fig, f"Fused system vs thresholded PIR ({tag})", x=0.01, ha="left", fontweight="bold", fontsize=11)
     fig.tight_layout()
-    fig.savefig(out / "requirements.png")
+    fig.savefig(out / filename)
     plt.close(fig)
 
 
-def figImprovements(metrics, colours, tag, out):
+def figImprovements(metrics, colours, tag, out, filename="improvements.png"):
     pir = metrics["Thresholded PIR"]
     fused = [n for n in metrics if n != "Thresholded PIR"]
     labels = ["Accuracy gain", "False alarm reduction"]
     keys = ["Accuracy Gain (%)", "Pfa Reduction (%)"]
     targets = [TARGET_ACC_GAIN, TARGET_PFA_DROP]
-    fig, ax = plt.subplots(figsize=(8, 3.8))
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH * 0.9, 3.0))
     width = 0.8 / len(fused)
     for k, name in enumerate(fused):
         c = compareToPir(metrics[name], pir)
-        vals = [c[key] for key in keys]
+        vals = [c[key] if np.isfinite(c[key]) else 0.0 for key in keys]
         x = np.arange(len(labels)) + (k - (len(fused) - 1) / 2) * width
         ax.bar(x, vals, width=width * 0.92, color=colours[name], label=name)
         for xi, v in zip(x, vals):
@@ -341,17 +365,17 @@ def figImprovements(metrics, colours, tag, out):
     ax.axhline(0, color=TEXT_2, linewidth=0.8)
     ax.set_xticks(np.arange(len(labels)), labels)
     ax.set_ylabel("Relative to thresholded PIR (%)")
-    ax.set_title(f"Spec 1: improvement over thresholded PIR ({tag})", loc="left", fontsize=10)
+    _title(ax, f"Requirement 1: improvement over thresholded PIR ({tag})", loc="left", fontsize=10)
     ax.legend(loc="upper left", fontsize=8)
     ax.grid(axis="x", visible=False)
     fig.tight_layout()
-    fig.savefig(out / "improvements.png")
+    fig.savefig(out / filename)
     plt.close(fig)
 
 
 def figWard(metrics, colours, tag, out):
     names = list(metrics)
-    fig, ax = plt.subplots(figsize=(9, 3.8))
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, 3.0))
     width = 0.8 / len(names)
     x0 = np.arange(len(WARD_KEYS))
     for k, name in enumerate(names):
@@ -360,7 +384,7 @@ def figWard(metrics, colours, tag, out):
         ax.bar(x, vals, width=width * 0.92, color=colours[name], label=name)
     ax.set_xticks(x0, [f"{WARD_NAMES[k]}\n({k})" for k in WARD_KEYS], fontsize=8)
     ax.set_ylabel("Number of events")
-    ax.set_title(f"Ward-style event quality, INTRUDER output ({tag})", loc="left", fontsize=10)
+    _title(ax, f"Ward-style event quality, INTRUDER output ({tag})", loc="left", fontsize=10)
     ax.legend(fontsize=8)
     ax.grid(axis="x", visible=False)
     fig.tight_layout()
@@ -371,7 +395,7 @@ def figWard(metrics, colours, tag, out):
 def figOperatingCurve(evalData, systems, metrics, colours, tag, out):
     """Event Pd vs Pfa when INTRUDER = (confidence >= t), t swept 0..1."""
     recordings = Recordings(evalData)
-    fig, ax = plt.subplots(figsize=(6, 4.2))
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH * 0.8, 3.6))
     for name, system in systems.items():
         if system.get("scores") is None:
             continue
@@ -391,7 +415,7 @@ def figOperatingCurve(evalData, systems, metrics, colours, tag, out):
     ax.set_ylim(0, 102)
     ax.set_xlabel("False alarm probability (%)")
     ax.set_ylabel("Event probability of detection (%)")
-    ax.set_title(f"Operating curve ({tag})\nlines: single alarm threshold swept; dots: three-state system",
+    _title(ax, f"Operating curve ({tag})\nlines: single alarm threshold swept; dots: three-state system",
                  loc="left", fontsize=9)
     ax.legend(loc="lower right", fontsize=8)
     fig.tight_layout()
@@ -420,7 +444,7 @@ def figTimelines(evalData, systems, colours, tag, out):
         score = np.asarray(fused["scores"])[item["idx"]]
         fusedStates = np.asarray(fused["states"])[item["idx"]]
         pirStates = np.asarray(systems["Thresholded PIR"]["states"])[item["idx"]]
-        fig, axes = plt.subplots(3, 1, figsize=(11, 5), sharex=True, gridspec_kw={"height_ratios": [2.2, 1, 1]})
+        fig, axes = plt.subplots(3, 1, figsize=(FIG_WIDTH, 4.2), sharex=True, gridspec_kw={"height_ratios": [2.2, 1, 1]})
         for ax in axes:
             _shade(ax, t, outbound & ~inbound, OUTBOUND, 0.18)
             _shade(ax, t, inbound, INBOUND, 0.15)
@@ -444,7 +468,7 @@ def figTimelines(evalData, systems, colours, tag, out):
                                 Patch(color=OUTBOUND, alpha=0.4, label="Person outside zone (outbound)")],
                        loc="lower right", bbox_to_anchor=(1.0, 1.0), fontsize=8, ncol=2)
         name = Path(item["recording"]).name
-        axes[0].set_title(f"{name}: {fusedName} vs thresholded PIR ({tag})", loc="left", fontsize=10)
+        _title(axes[0], f"{name}: {fusedName} vs thresholded PIR ({tag})", loc="left", fontsize=10)
         fig.tight_layout()
         fig.savefig(out / f"timeline_{name}.png")
         plt.close(fig)
@@ -454,7 +478,7 @@ def figFalseAlarms(breakdowns, tag, out):
     names = list(breakdowns)
     edge = [breakdowns[n]["ALL"][0] for n in names]
     iso = [breakdowns[n]["ALL"][1] for n in names]
-    fig, ax = plt.subplots(figsize=(7.5, 3.6))
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, 3.0))
     y = np.arange(len(names))
     ax.barh(y, edge, color="#eda100", label=f"Edge (within {EDGE_WINDOW_S:g} s of a person)",
             edgecolor="white", linewidth=2)
@@ -465,7 +489,7 @@ def figFalseAlarms(breakdowns, tag, out):
     ax.invert_yaxis()
     ax.set_xlabel("False-alarm fusion intervals")
     ax.set_xlim(0, max(e + i for e, i in zip(edge, iso)) * 1.35 + 1)
-    ax.set_title(f"Where the false alarms happen ({tag})", loc="left", fontsize=10)
+    _title(ax, f"Where the false alarms happen ({tag})", loc="left", fontsize=10)
     ax.legend(fontsize=8, loc="lower right")
     ax.grid(axis="y", visible=False)
     fig.tight_layout()
@@ -475,14 +499,14 @@ def figFalseAlarms(breakdowns, tag, out):
 
 def figFeatureImportance(names, importance, out, top=15):
     order = np.argsort(importance)[::-1][:top]
-    fig, ax = plt.subplots(figsize=(7.5, 0.3 * len(order) + 1.2))
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, 0.25 * len(order) + 0.9))
     y = np.arange(len(order))
     colours = [SYSTEM_COLOURS[0] if names[i].startswith("thermal") else SYSTEM_COLOURS[1] for i in order]
     ax.barh(y, 100 * np.asarray(importance)[order], color=colours)
     ax.set_yticks(y, [names[i] for i in order], fontsize=8)
     ax.invert_yaxis()
-    ax.set_xlabel("Share of impurity reduction (%)")
-    ax.set_title("First-principles Random Forest: most important features", loc="left", fontsize=10)
+    ax.set_xlabel("Share of squared-error reduction (%)")
+    _title(ax, "First-principles Gradient Boosting: most important features", loc="left", fontsize=10)
     ax.legend(handles=[Patch(color=SYSTEM_COLOURS[0], label="Thermopile"),
                        Patch(color=SYSTEM_COLOURS[1], label="PIR")], fontsize=8, loc="lower right")
     ax.grid(axis="y", visible=False)
@@ -491,8 +515,43 @@ def figFeatureImportance(names, importance, out, top=15):
     plt.close(fig)
 
 
+# First-Principles vs scikit-learn Gradient Boosting (offlineRun.py --train):
+# left, the confidence of every validation interval from both implementations;
+# right, the resulting Pd, Pfa and accuracy side by side
+def figImplementationCheck(firstScores, libraryScores, metrics, firstName, libraryName, out,
+                           filename="fp_vs_sklearn.png"):
+    colours = {firstName: SYSTEM_COLOURS[0], libraryName: SYSTEM_COLOURS[1]}
+    fig, axes = plt.subplots(1, 2, figsize=(FIG_WIDTH, 3.0), gridspec_kw={"width_ratios": [1, 1.3]})
+    ax = axes[0]
+    ax.plot([0, 1], [0, 1], color=TEXT_2, linestyle="--", linewidth=0.8)
+    ax.scatter(libraryScores, firstScores, s=4, alpha=0.35, color=SYSTEM_COLOURS[0], linewidths=0)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_aspect("equal")
+    ax.set_xlabel(f"{libraryName} confidence", fontsize=9)
+    ax.set_ylabel(f"{firstName} confidence", fontsize=9)
+    ax = axes[1]
+    keys = [("Event Pd (%)", "Pd"), ("Pfa (%)", "Pfa"), ("Accuracy (%)", "Accuracy")]
+    names = [firstName, libraryName]
+    width = 0.38
+    for k, name in enumerate(names):
+        x = np.arange(len(keys)) + (k - 0.5) * width
+        vals = [metrics[name][key] for key, _ in keys]
+        ax.bar(x, vals, width=width * 0.92, color=colours[name], label=name)
+        for xi, v in zip(x, vals):
+            ax.text(xi, v, f"{v:.1f}", ha="center", va="bottom", color=TEXT, fontsize=7)
+    ax.set_xticks(np.arange(len(keys)), [label for _, label in keys])
+    ax.set_ylabel("%", fontsize=9)
+    ax.set_ylim(0, 112)
+    ax.legend(fontsize=7, loc="upper center", ncol=2, bbox_to_anchor=(0.5, 1.12))
+    ax.grid(axis="x", visible=False)
+    fig.tight_layout()
+    fig.savefig(Path(out) / filename, bbox_inches="tight")
+    plt.close(fig)
+
+
 def writeEvaluationReport(runName, evalData, systems, outDir, description, tag,
-                          featureNames=None, importance=None, extraLines=()):
+                          featureNames=None, importance=None, extraLines=(), timelines=True):
     """systems: {name: {"states", "scores" (optional), "thresholds" (optional)}};
     must contain "Thresholded PIR". The first other system is the main fused system."""
     out = Path(outDir)
@@ -510,7 +569,7 @@ def writeEvaluationReport(runName, evalData, systems, outDir, description, tag,
     lines += perRecordingTable(evalData, systems)
     if importance is not None:
         order = np.argsort(importance)[::-1]
-        lines += ["\nFEATURE IMPORTANCE (first-principles Random Forest, share of impurity reduction)"]
+        lines += ["\nFEATURE IMPORTANCE (first-principles Gradient Boosting, share of squared-error reduction)"]
         lines += [f"{featureNames[i]:36s} {100 * importance[i]:6.2f}%" for i in order]
 
     figRequirements(metrics, colours, tag, out)
@@ -518,7 +577,8 @@ def writeEvaluationReport(runName, evalData, systems, outDir, description, tag,
     figWard(metrics, colours, tag, out)
     figFalseAlarms(breakdowns, tag, out)
     figOperatingCurve(evalData, systems, metrics, colours, tag, out)
-    figTimelines(evalData, systems, colours, tag, out)
+    if timelines:
+        figTimelines(evalData, systems, colours, tag, out)
     if importance is not None:
         figFeatureImportance(featureNames, importance, out)
 
