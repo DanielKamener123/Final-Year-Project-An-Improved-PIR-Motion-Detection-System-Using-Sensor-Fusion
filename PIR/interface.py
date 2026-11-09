@@ -34,6 +34,14 @@ class PIRAcquisition(threading.Thread):
         # ADC Setup
         self.actualADCRateHz = selectDataRate(sampleRateHz)
 
+        # The ADC Is Opened In connect() (first sample, and again after an I2C failure),
+        # so a missing or unplugged ADC no longer stops the program from starting
+        self.adc = None
+        self.channel = None
+        self.connectError = None
+
+    # Opens The ADS1115 And Its AIN0 Channel
+    def connect(self):
         # Get I2C Bus Object For The ADS1115
         i2c = adafruit_extended_bus.ExtendedI2C(i2cBusNumber)
 
@@ -53,8 +61,23 @@ class PIRAcquisition(threading.Thread):
         next_t = time.monotonic()
 
         while not self.stopEvent.is_set():
-            # Get Voltage
-            v = self.channel.voltage
+            # Get Voltage (an I2C failure is reported once, then retried every second)
+            try:
+                if self.channel is None:
+                    self.connect()
+                v = self.channel.voltage
+            except Exception as exc:
+                if self.connectError is None:
+                    print(f"PIR ADC read failed ({exc}); retrying every second", flush=True)
+                self.connectError = exc
+                self.adc = None
+                self.channel = None
+                self.stopEvent.wait(1.0)
+                next_t = time.monotonic()
+                continue
+            if self.connectError is not None:
+                print("PIR ADC reading again", flush=True)
+                self.connectError = None
 
             # Timestamp immediately after the ADC value has been read
             ts = time.time()

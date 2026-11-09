@@ -41,7 +41,17 @@ FEATURE_HOLD_S = 1.0      # Repeat last good thermal features for at most this l
 # with straight lines between bands is used. Outside the table: nearest end.
 # Cold backgrounds (e.g. sky) are very noisy -> high thresholds; typical
 # 23-33 C backgrounds get thresholds slightly below the old 2.
-THRESHOLD_FLOOR = 2.0     # Thresholds are only ever RAISED above the old value
+THRESHOLD_FLOOR = 1.2     # Thresholds are only ever RAISED above the old value
+
+# Demo Setting: One Fixed Z Threshold For Every Pixel Instead Of The Temperature Table.
+# The table raised the threshold to ~4.5-7 in cold scenes (17 C) and the thermopile
+# missed 81% of the walks there; at 27 C it was too low and flagged most empty frames.
+# Fixed values chosen by leave-one-recording-out comparison (cold venue, driveway, hot uni):
+# best detection with the least alarmed time in the empty recordings.
+# These are the effective thresholds (the table path scales its values by 0.8).
+USE_FIXED_THRESHOLD = True
+FIXED_Z_RAW = 1.6         # current-frame detector
+FIXED_Z_AVG = 1.84        # recent-frame-average detector
 THRESHOLD_TABLE_RAW = [
     (13.0, 15.49),
     (15.0, 9.11),
@@ -237,7 +247,7 @@ def threshold_from_table(background, table):
     # Never go below the old fixed threshold: noisy sites (e.g. the
     # 4 Hz Cefim recordings) crossed the measured mid-range values
     # 4-5% of the time, so lowering it is not justified by the data.
-    return np.maximum(threshold_map, THRESHOLD_FLOOR)
+    return np.maximum(threshold_map * 0.8, THRESHOLD_FLOOR)
 
 
 # Fix 5 - Z Score Of The Average Of The Recent Corrected Differences
@@ -624,8 +634,12 @@ class ThermopilePipeline:
 
         # Step 4 / Fix 4: each pixel's threshold from its own background temperature
         scene_temp = self.bg_model.scene_temperature()
-        threshold_raw = threshold_from_table(self.bg_model.bg, THRESHOLD_TABLE_RAW)
-        threshold_avg = threshold_from_table(self.bg_model.bg, THRESHOLD_TABLE_AVG)
+        if USE_FIXED_THRESHOLD:
+            threshold_raw = np.full(self.frame_shape, FIXED_Z_RAW)
+            threshold_avg = np.full(self.frame_shape, FIXED_Z_AVG)
+        else:
+            threshold_raw = threshold_from_table(self.bg_model.bg, THRESHOLD_TABLE_RAW)
+            threshold_avg = threshold_from_table(self.bg_model.bg, THRESHOLD_TABLE_AVG)
         ratio = threshold_ratio(smoothed_z, threshold_raw, smoothed_z_avg, threshold_avg)
         mask = ratio > 1.0                     # foreground if EITHER detector fires
 

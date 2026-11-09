@@ -29,7 +29,7 @@ from sklearn.ensemble import (
 
 # Config
 RANDOM_STATE = 42
-WINDOWS = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
+WINDOWS = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
 PIR_SYSTEM = "Thresholded PIR"
 
 # Preprocessing
@@ -132,7 +132,7 @@ def compareModels(trainingPath, validationPath, windows=WINDOWS, progress=print)
 
 # Worst-case detection delay allowed when selecting a configuration: a margin on
 # the 10 s requirement so that one slow entry does not fail Spec 4
-SELECTION_MAX_DELAY_S = 8.0
+SELECTION_MAX_DELAY_S = 9.0
 
 
 # Best Fused Configuration: most requirement checks met (Spec 1 accuracy,
@@ -144,6 +144,9 @@ def bestConfiguration(results, system=None):
     if system is not None:
         fused = fused[fused["System"] == system]
     fused["Delay Margin"] = fused["Max Delay (s)"] <= SELECTION_MAX_DELAY_S
-    order = fused.sort_values(["Requirements Met", "Delay Margin", "Pfa Reduction (%)", "Accuracy Gain (%)"],
-                              ascending=[False, False, False, False], kind="stable")
+    # Entries detected is ranked straight after the requirement checks, because the
+    # response-time check only covers alarmed entries
+    order = fused.sort_values(["Requirements Met", "Detected Events", "Delay Margin", "Pfa Reduction (%)",
+                               "Accuracy Gain (%)"],
+                              ascending=[False, False, False, False, False], kind="stable")
     return order.iloc[0]

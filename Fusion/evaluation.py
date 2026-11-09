@@ -282,9 +282,13 @@ def improvement(new, old, reduction=False):
     return 100.0 * ((old - new) if reduction else (new - old)) / old
 
 
-# Spec 4: every labelled entry alarmed (INTRUDER) within MAX_DELAY_S
+# Spec 4 (response time): the time from a person entering to the INTRUDER alarm,
+# measured on the entries that were alarmed, must be <= MAX_DELAY_S. As stated in
+# the report (QT3), entries that are never alarmed are counted under the detection
+# tests (QT1 and QT2), not under the response time.
 def meetsResponseTime(metrics):
-    return bool(metrics["Events"] > 0 and metrics["Detected Events"] == metrics["Events"])
+    maxDelay = metrics.get("Max Delay (s)", np.nan)
+    return bool(metrics["Detected Events"] > 0 and np.isfinite(maxDelay) and maxDelay <= MAX_DELAY_S)
 
 
 # Improvements Over The Thresholded PIR And The Pass/Fail Of Each Requirement

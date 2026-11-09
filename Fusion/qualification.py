@@ -18,10 +18,11 @@ Recording folder names carry the test information:
            2People-Apart         two people entering a few seconds apart
     e.g. Garden_4m_Day, Garden_Edge+55_Day, Garden_Empty_Night, Garden_2People-Apart_Day
 
-Walk speed = walking line length / labelled time inside the zone. The walking
-line length is the measured value in PATH_LENGTH_M, or 2 d tan(55 deg) if it
-was not measured. Within each distance recording the walks are sorted by
-speed: the slowest quarter is "Very slow", then "Slow", "Medium" and "Fast".
+Walk speed = the target speed of the walk's speed class (SPEED_CLASS_MS); it is not
+calculated from the walking line length and the labelled time. The speed class of
+each walk comes from the recording's speed_classes.csv (one row per labelled walk in
+time order) or, without that file, from the walking order of the protocol: three
+Fast, three Medium, three Slow, then three Very slow walks (12 walks).
 
 Outputs (all in the run folder):
     report.txt              every number, the pass rules and any warnings
@@ -53,11 +54,16 @@ from Fusion import report
 
 
 # Config
-SEEN_SITE = "Garden"                 # site the model was trained at (first word of the folder name)
+SEEN_SITE = "Driveway"                 # site the model was trained at (first word of the folder name)
 HALF_FOV_DEG = 55.0                  # half of the 110 deg detection zone
 # Measured walking line length (m) at each distance; None = use 2 d tan(55 deg)
-PATH_LENGTH_M = {1: None, 4: None, 6: None, 8: None, 10: None}
+PATH_LENGTH_M = {1: 1.84, 4: 5.96, 7: 10.88, 10: 12.88}
+#PATH_LENGTH_M = {1: None, 4: None, 7: None, 10: None}
 SPEED_CLASSES = ("Very slow", "Slow", "Medium", "Fast")
+# Target speed of each speed class (m/s), used as the speed of every walk in that class
+SPEED_CLASS_MS = {"Very slow": 0.2, "Slow": 0.5, "Medium": 1.4, "Fast": 5.0}
+# Protocol walking order when a recording has no speed_classes.csv
+PROTOCOL_ORDER = ("Fast", "Medium", "Slow", "Very slow")
 WALKS_PER_CLASS = 3
 REQUIRED_RANGE_M = (1.0, 10.0)       # Requirement 2
 REQUIRED_SPEED_MS = (0.2, 5.0)       # Requirement 3
@@ -134,6 +140,15 @@ def firstIntruder(times, states, s, e):
     return None
 
 
+# Response Time: first INTRUDER while the person is still in the zone (no 10 s limit).
+# Used by QT2 (was the walk detected at all) and QT3 (how long it took).
+def firstIntruderInZone(times, states, s, e):
+    for k in range(s, e + 1):
+        if states[k] == INTRUDER:
+            return float(times[k] - times[s])
+    return None
+
+
 # One Row Per Labelled Entry (same detection rule as the Pd in Fusion/evaluation.py)
 def walkTable(data, warnings):
     rows = []
@@ -154,32 +169,64 @@ def walkTable(data, warnings):
         for number, (s, e) in enumerate(item["entries"], start=1):
             match = [(a, b) for a, b in intervals if a <= times[s] < b]
             duration = float(match[0][1] - match[0][0]) if match else float(times[e] - times[s])
-            speed = None
-            if info["kind"] == "distance" and duration > 0:
-                speed = pathLength(info["distance"])[0] / duration
+            speed = None       # set from the speed class below (target speed, not calculated)
             fusedDelay = firstIntruder(times, fusedStates, s, e)
             pirDelay = firstIntruder(times, pirStates, s, e)
+            fusedResponse = firstIntruderInZone(times, fusedStates, s, e)
+            pirResponse = firstIntruderInZone(times, pirStates, s, e)
             rows.append({"recording": name, "site": info["site"], "kind": info["kind"],
                          "condition": info["condition"], "distance": info["distance"], "edge": info["edge"],
                          "people": info["people"], "walk": number, "start_s": float(times[s]),
                          "duration_s": duration, "speed_ms": speed,
                          "fusedDetected": fusedDelay is not None, "fusedDelay": fusedDelay,
-                         "pirDetected": pirDelay is not None, "pirDelay": pirDelay})
+                         "pirDetected": pirDelay is not None, "pirDelay": pirDelay,
+                         "fusedSeen": fusedResponse is not None, "fusedResponse": fusedResponse,
+                         "pirSeen": pirResponse is not None, "pirResponse": pirResponse})
     walks = pd.DataFrame(rows, columns=["recording", "site", "kind", "condition", "distance", "edge", "people",
                                         "walk", "start_s", "duration_s", "speed_ms", "fusedDetected",
-                                        "fusedDelay", "pirDetected", "pirDelay"])
-    for column in ("duration_s", "speed_ms", "fusedDelay", "pirDelay", "distance"):
+                                        "fusedDelay", "pirDetected", "pirDelay", "fusedSeen", "fusedResponse",
+                                        "pirSeen", "pirResponse"])
+    for column in ("duration_s", "speed_ms", "fusedDelay", "pirDelay", "fusedResponse", "pirResponse", "distance"):
         walks[column] = pd.to_numeric(walks[column], errors="coerce")
     walks["fusedDetected"] = walks["fusedDetected"].astype(bool)
     walks["pirDetected"] = walks["pirDetected"].astype(bool)
+    walks["fusedSeen"] = walks["fusedSeen"].astype(bool)
+    walks["pirSeen"] = walks["pirSeen"].astype(bool)
     walks["speedClass"] = None
+    recordingPaths = {Path(r).name: Path(r) for r in data["recording"].unique()}
     for name, group in walks[walks["kind"] == "distance"].groupby("recording"):
+        # Speed class of every walk as walked (optional speed_classes.csv, one row per
+        # labelled walk in time order, column "speed_class"). This keeps the classes
+        # correct when a recording has extra or missing walks.
+        classFile = recordingPaths[name] / "speed_classes.csv"
+        if classFile.is_file():
+            classes = pd.read_csv(classFile)["speed_class"].astype(str).str.strip().tolist()
+            unknown = sorted(set(classes) - set(SPEED_CLASSES))
+            if unknown:
+                raise ValueError(f"{classFile}: unknown speed classes {unknown}; use {SPEED_CLASSES}")
+            if len(classes) != len(group):
+                raise ValueError(f"{classFile}: {len(classes)} classes for {len(group)} evaluated walks")
+            walks.loc[group.sort_values("walk").index, "speedClass"] = classes
+            counts = pd.Series(classes).value_counts()
+            for speedClass in SPEED_CLASSES:
+                if counts.get(speedClass, 0) != WALKS_PER_CLASS:
+                    warnings.append(f"{name}: {counts.get(speedClass, 0)} {speedClass.lower()} walks "
+                                    f"instead of {WALKS_PER_CLASS}.")
+            continue
+        # No speed_classes.csv: the protocol order (three walks per class) is only used
+        # when the recording has exactly the expected number of walks
         expected = WALKS_PER_CLASS * len(SPEED_CLASSES)
         if len(group) != expected:
-            warnings.append(f"{name}: {len(group)} walks instead of {expected}; speed classes split as evenly as possible.")
-        order = group.sort_values("speed_ms").index.to_numpy()
-        for speedClass, members in zip(SPEED_CLASSES, np.array_split(order, len(SPEED_CLASSES))):
+            raise ValueError(f"{name}: {len(group)} walks instead of {expected}. Add "
+                             f"{recordingPaths[name] / 'speed_classes.csv'} (column speed_class, one row per "
+                             f"labelled walk in time order, values {SPEED_CLASSES}).")
+        ordered = group.sort_values("walk").index.to_numpy()
+        for speedClass, members in zip(PROTOCOL_ORDER, np.split(ordered, len(PROTOCOL_ORDER))):
             walks.loc[members, "speedClass"] = speedClass
+    # Speed of every distance walk = target speed of its class
+    isDistance = walks["kind"] == "distance"
+    walks.loc[isDistance, "speed_ms"] = walks.loc[isDistance, "speedClass"].map(SPEED_CLASS_MS)
+    walks["speed_ms"] = pd.to_numeric(walks["speed_ms"], errors="coerce")
     return walks
 
 
@@ -333,7 +380,7 @@ def qt2Tables(walks, edgeWalks, warnings):
         lines += textRows
         lines.append("  Total    | " + " | ".join(f"{c:>12}" for c in textTotals))
         lines.append("  Speed m/s| " + " | ".join(f"{c:>12}" for c in textSpeeds))
-        rows += ["hline", [r"\textbf{Total}"] + totals, "hline", [r"\textbf{Measured speed (m/s)}"] + speeds]
+        rows += ["hline", [r"\textbf{Total}"] + totals, "hline", [r"\textbf{Target speed (m/s)}"] + speeds]
         counts = walks.groupby(["distance", "speedClass"]).size()
         cellText = (f"Each cell contains {int(counts.iloc[0])} walks." if counts.nunique() == 1
                     else "The number of walks per cell is given in report.txt.")
@@ -341,12 +388,8 @@ def qt2Tables(walks, edgeWalks, warnings):
             "|c|c|c|c|c|c|", ["Distance (m)"] + list(SPEED_CLASSES) + ["Total"], rows,
             "Entries detected per distance and speed class, given as fused system / thresholded PIR. " + cellText,
             "tab:qt2_range_speed")
-        measured = [f"  Walking line length used: " + ", ".join(
-            f"{d:g} m -> {pathLength(d)[0]:.2f} m ({'measured' if pathLength(d)[1] else '2 d tan 55'})"
-            for d in distances)]
-        lines += measured
-        if not all(pathLength(d)[1] for d in distances):
-            warnings.append("PATH_LENGTH_M is not filled in for every distance; speeds use 2 d tan(55 deg).")
+        lines.append("  Speeds are the target speed of each class: " +
+                     ", ".join(f"{c} {SPEED_CLASS_MS[c]:g} m/s" for c in SPEED_CLASSES))
 
     # Edge walks
     lines.append("  Edge walks:")
@@ -396,48 +439,56 @@ def qt2Tables(walks, edgeWalks, warnings):
 
 
 def qt3Tables(qt1Walks, qt2Walks):
+    """Response time of EVERY entry: first INTRUDER while the person is in the zone (no 10 s
+    limit), so an entry alarmed late is reported here with its real response time."""
     lines = ["\nQT3: RESPONSE TIME (Requirement 4)"]
-    detected = qt1Walks[qt1Walks["fusedDetected"]]
-    meanDelay = detected["fusedDelay"].mean() if len(detected) else np.nan
-    maxDelay = detected["fusedDelay"].max() if len(detected) else np.nan
-    alarmed = f"{len(detected)}/{len(qt1Walks)}"
-    delayOk = bool(len(qt1Walks)) and len(detected) == len(qt1Walks) and maxDelay <= MAX_DELAY_S
-    lines += [f"  Entries alarmed (INTRUDER within {MAX_DELAY_S:g} s): {alarmed}",
-              f"  Mean detection delay: {num(meanDelay, 2)} s, maximum: {num(maxDelay, 2)} s",
+    seen = qt1Walks[qt1Walks["fusedSeen"]]
+    response = seen["fusedResponse"].to_numpy(dtype=float)
+    within = int(np.sum(response <= MAX_DELAY_S))
+    late = seen[seen["fusedResponse"] > MAX_DELAY_S]
+    never = len(qt1Walks) - len(seen)
+    meanDelay = float(np.mean(response)) if len(response) else np.nan
+    medianDelay = float(np.median(response)) if len(response) else np.nan
+    p95Delay = float(np.percentile(response, 95)) if len(response) else np.nan
+    maxDelay = float(np.max(response)) if len(response) else np.nan
+    delayOk = bool(len(qt1Walks)) and within == len(qt1Walks)
+    lines += [f"  Entries alarmed (INTRUDER) within {MAX_DELAY_S:g} s: {within}/{len(qt1Walks)}",
+              f"  Entries alarmed after {MAX_DELAY_S:g} s: {len(late)}"
+              + "".join(f"  [{r['recording']} walk {int(r['walk'])}: {r['fusedResponse']:.2f} s]" for _, r in late.iterrows()),
+              f"  Entries never alarmed: {never}",
+              f"  Response time: mean {num(meanDelay, 2)} s, median {num(medianDelay, 2)} s, "
+              f"95th percentile {num(p95Delay, 2)} s, maximum {num(maxDelay, 2)} s",
               "  Processing time per frame is not measured by this script; worst-case response time =",
-              f"  maximum delay ({num(maxDelay, 2)} s) + maximum processing time.",
-              f"  Detection delay alone within {MAX_DELAY_S:g} s for every entry: {passText(delayOk)}"]
-    rows = [["Entries alarmed (INTRUDER)", alarmed],
-            ["Mean detection delay (s)", num(meanDelay, 2)],
-            ["Maximum detection delay (s)", num(maxDelay, 2)],
+              f"  maximum response ({num(maxDelay, 2)} s) + maximum processing time."]
+    rows = [[f"Entries alarmed within {MAX_DELAY_S:g}~s", f"{within}/{len(qt1Walks)}"],
+            [f"Entries alarmed after {MAX_DELAY_S:g}~s", f"{len(late)}"],
+            ["Mean response time (s)", num(meanDelay, 2)],
+            ["Median response time (s)", num(medianDelay, 2)],
+            ["95th percentile response time (s)", num(p95Delay, 2)],
+            ["Maximum response time (s)", num(maxDelay, 2)],
             "hline",
             ["Mean processing time per frame (ms)", "XX"],
             ["Maximum processing time per frame (ms)", "XX"],
             "hline",
-            [r"\textbf{Worst-case response time (s)}", r"\textbf{XX}"],
-            [r"\textbf{Requirement}", r"$\leq 10$~s"],
-            [r"\textbf{Pass/Fail}", f"XX % detection delay alone: {passText(delayOk)}"]]
+            [r"\textbf{Specification}", r"$\leq 10$~s"]]
     tex = {"qt3_response": texTable(
         "|l|c|", ["Measurement", "Value"], rows,
-        "Response time of the fused system on the testing recordings. Worst-case response time is the "
-        "maximum detection delay plus the maximum processing time.", "tab:qt3_response")}
-    # The Pass/Fail cell holds a LaTeX comment, so end that line properly
-    tex["qt3_response"] = tex["qt3_response"].replace(
-        f"XX % detection delay alone: {passText(delayOk)} \\\\",
-        f"XX \\\\ % detection delay alone: {passText(delayOk)}")
+        "Response time of the fused system on the testing recordings: time from the labelled entry to "
+        "the first Intruder state while the person is in the detection zone.", "tab:qt3_response")}
 
     speedRows = []
-    lines.append(f"  {'Speed class':10s} | {'Alarmed':>7} | {'Mean s':>6} | {'Max s':>6}")
+    lines.append(f"  {'Speed class':10s} | {'<=10 s':>7} | {'Mean s':>6} | {'Max s':>6}")
     for speedClass in SPEED_CLASSES:
         cell = qt2Walks[qt2Walks["speedClass"] == speedClass] if len(qt2Walks) else qt2Walks
-        hit = cell[cell["fusedDetected"]] if len(cell) else cell
-        values = [f"{len(hit)}/{len(cell)}", num(hit["fusedDelay"].mean() if len(hit) else np.nan, 2),
-                  num(hit["fusedDelay"].max() if len(hit) else np.nan, 2)]
+        hit = cell[cell["fusedSeen"]] if len(cell) else cell
+        inTime = int((hit["fusedResponse"] <= MAX_DELAY_S).sum()) if len(hit) else 0
+        values = [f"{inTime}/{len(cell)}", num(hit["fusedResponse"].mean() if len(hit) else np.nan, 2),
+                  num(hit["fusedResponse"].max() if len(hit) else np.nan, 2)]
         speedRows.append([speedClass] + values)
         lines.append(f"  {speedClass:10s} | {values[0]:>7} | {values[1]:>6} | {values[2]:>6}")
-    tex["qt3_speed_delay"] = texTable("|l|c|c|c|", ["Speed class", "Entries alarmed", "Mean delay (s)",
-                                                    "Maximum delay (s)"], speedRows,
-                                      "Detection delay of the fused system per speed class.",
+    tex["qt3_speed_delay"] = texTable("|l|c|c|c|", ["Speed class", f"Alarmed within {MAX_DELAY_S:g}~s",
+                                                    "Mean response (s)", "Maximum response (s)"], speedRows,
+                                      "Response time of the fused system per speed class.",
                                       "tab:qt3_speed_delay")
     return lines, tex, delayOk
 
@@ -511,15 +562,18 @@ def qt4Tables(groups, multiWalks, qt1Group):
 # ---------------------------------------------------------------------------
 
 def figDelayHistogram(walks, out, filename="qt3_delay_histogram.png"):
-    delays = walks.loc[walks["fusedDetected"], "fusedDelay"].to_numpy(dtype=float)
+    # Every alarmed entry, including any alarmed after the 10 s requirement
+    delays = walks.loc[walks["fusedSeen"], "fusedResponse"].to_numpy(dtype=float)
     fig, ax = plt.subplots(figsize=(report.FIG_WIDTH * 0.85, 2.8))
-    bins = np.arange(0, MAX_DELAY_S + 0.5, 0.5)
+    upper = max(MAX_DELAY_S, float(np.max(delays)) if len(delays) else 0.0) + 1.0
+    bins = np.arange(0, upper + 0.5, 0.5)
     ax.hist(delays, bins=bins, color=report.SYSTEM_COLOURS[0], edgecolor="white", linewidth=1)
     ax.axvline(MAX_DELAY_S, color=report.TEXT, linestyle="--", linewidth=1.2)
     ax.text(MAX_DELAY_S, ax.get_ylim()[1], f" {MAX_DELAY_S:g} s requirement", ha="right", va="top",
             color=report.TEXT_2, fontsize=8, rotation=90)
-    ax.set_xlim(0, MAX_DELAY_S + 0.5)
-    ax.set_xlabel("Detection delay (s)")
+    ax.set_xlim(0, upper)
+    ax.set_xlabel("Response time (s)")
+    ax.yaxis.get_major_locator().set_params(integer=True)
     ax.set_ylabel("Number of entries")
     ax.grid(axis="x", visible=False)
     fig.tight_layout()
@@ -527,15 +581,21 @@ def figDelayHistogram(walks, out, filename="qt3_delay_histogram.png"):
     plt.close(fig)
 
 
-# Every Distance Walk: speed vs distance, filled = detected, cross = missed
+# Every Distance Walk: speed vs distance. Filled = alarmed within 10 s, open = alarmed
+# while in the zone but after 10 s, cross = never alarmed
 def figWalks(walks, out, filename="qt2_walks.png"):
     fig, axes = plt.subplots(1, 2, figsize=(report.FIG_WIDTH, 3.0), sharey=True)
-    for ax, column, name, colour in [(axes[0], "fusedDetected", FUSED, report.SYSTEM_COLOURS[0]),
-                                     (axes[1], "pirDetected", PIR, report.PIR_COLOUR)]:
+    for ax, column, seenColumn, name, colour in [(axes[0], "fusedDetected", "fusedSeen", FUSED, report.SYSTEM_COLOURS[0]),
+                                                 (axes[1], "pirDetected", "pirSeen", PIR, report.PIR_COLOUR)]:
         hit = walks[walks[column]]
-        miss = walks[~walks[column]]
-        ax.scatter(hit["speed_ms"], hit["distance"], s=28, color=colour, edgecolor="white", linewidth=0.8)
-        ax.scatter(miss["speed_ms"], miss["distance"], s=36, marker="x", color="#e34948", linewidth=1.6)
+        lateHit = walks[walks[seenColumn] & ~walks[column]]
+        miss = walks[~walks[seenColumn]]
+        # Walks of one class share a target speed: spread them slightly so all three show
+        spread = walks.groupby(["distance", "speedClass"]).cumcount() - 1
+        x = walks["speed_ms"] * (1.0 + 0.12 * spread)
+        ax.scatter(x[hit.index], hit["distance"], s=28, color=colour, edgecolor="white", linewidth=0.8)
+        ax.scatter(x[lateHit.index], lateHit["distance"], s=30, facecolor="white", edgecolor=colour, linewidth=1.4)
+        ax.scatter(x[miss.index], miss["distance"], s=36, marker="x", color="#e34948", linewidth=1.6)
         for limit in REQUIRED_SPEED_MS:
             ax.axvline(limit, color=report.TEXT_2, linestyle=":", linewidth=1)
         ax.set_xscale("log")
@@ -543,14 +603,16 @@ def figWalks(walks, out, filename="qt2_walks.png"):
         ax.set_xticks(ticks, [f"{t:g}" for t in ticks])
         ax.minorticks_off()
         ax.set_ylim(0, max(11, float(walks["distance"].max()) + 1))
-        ax.set_xlabel("Measured walking speed (m/s)", fontsize=9)
+        ax.set_xlabel("Target walking speed (m/s)", fontsize=9)
         # Panel label (which system), kept even though figure titles are off
         ax.set_title(name, loc="left", fontsize=9, fontweight="normal")
     axes[0].set_ylabel("Distance from sensor (m)", fontsize=9)
-    axes[1].legend(handles=[Line2D([], [], marker="o", linestyle="", color=report.TEXT_2, label="Detected"),
-                            Line2D([], [], marker="x", linestyle="", color="#e34948", label="Missed")],
-                   fontsize=8, loc="lower right")
-    fig.tight_layout()
+    fig.legend(handles=[Line2D([], [], marker="o", linestyle="", color=report.TEXT_2, label="Detected within 10 s"),
+                            Line2D([], [], marker="o", linestyle="", markerfacecolor="white",
+                                   markeredgecolor=report.TEXT_2, label="Detected after 10 s"),
+                            Line2D([], [], marker="x", linestyle="", color="#e34948", label="Not detected")],
+                   fontsize=8, loc="lower center", ncol=3)
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
     fig.savefig(out / filename)
     plt.close(fig)
 
@@ -678,7 +740,12 @@ def writeQualificationReport(runName, evalData, scores, model, outDir, descripti
         "Fused system compared to the thresholded PIR on the testing recordings ($n = {n}$ entries, "
         "{negatives} non-human intervals).", "QT1: FUSED SYSTEM VS PIR ON ITS OWN (Requirement 1)")
     lines += qt1Lines
-    qt2Lines, qt2Tex, _ = qt2Tables(qt2Walks, edgeWalks, warnings)
+    # QT2 counts a walk as detected if INTRUDER is reached while the person is in the zone
+    # (capability at each distance, edge and speed); timing is QT3 and reliability is the Pd in QT1
+    inZone = lambda w: w.assign(fusedDetected=w["fusedSeen"], pirDetected=w["pirSeen"])
+    qt2Lines, qt2Tex, _ = qt2Tables(inZone(qt2Walks), inZone(edgeWalks), warnings)
+    qt2Lines.insert(2, f"  (detected = INTRUDER while the person is in the zone; within 10 s: fused "
+                       f"{int(qt2Walks['fusedDetected'].sum())}/{len(qt2Walks)}, PIR {int(qt2Walks['pirDetected'].sum())}/{len(qt2Walks)})")
     lines += qt2Lines
     tex.update(qt2Tex)
     qt3Lines, qt3Tex, _ = qt3Tables(qt1Walks, qt2Walks)

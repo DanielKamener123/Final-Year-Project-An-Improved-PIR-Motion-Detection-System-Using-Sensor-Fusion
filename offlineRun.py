@@ -4,9 +4,13 @@
                                                  window vs thresholded PIR (validation)
   python offlineRun.py --train --window 1.0      train the first-principles Gradient Boosting,
                                                  tune its alarm thresholds on validation and
-                                                 export it for the real-time system
+                                                 export it for the real-time system; also trains
+                                                 the PIR-only backup (same data, PIR features only)
   python offlineRun.py --test                    final verification of the exported model
                                                  on the testing recordings
+  python offlineRun.py --demo --name Demo_Tue    DEMO: train on every recording (no split), choose the
+                                                 alarm settings leave-one-session-out, export the fused
+                                                 model and the PIR-only backup (Fusion/demoTraining.py)
   python offlineRun.py --summary                 recordings, durations and labelled minutes
                                                  of every split (Section 3 data paragraph)
 
@@ -22,6 +26,7 @@ import re
 import numpy as np
 
 from Fusion.dataset import buildDataset, getFusedFeatureNames
+from PIR.processing import getHistoryFeatureNames
 from Fusion.evaluation import (LABEL_COLUMN, addOutboundLabels, pirBaselineStates,
                                runStateMachine, tuneThresholds)
 from Fusion.gradientBoosting import GradientBoosting
@@ -33,8 +38,13 @@ from Fusion.qualification import writeQualificationReport, datasetSummary
 trainingDataset = Path("Datasets/training")
 validationDataset = Path("Datasets/validation")
 testingDataset = Path("Datasets/testing")
+# Recordings from other sites: not used for training, validation or testing of the
+# site-trained model, only listed in the dataset summary (development data)
+otherSitesDataset = Path("Datasets/other_sites")
 outputPath = Path("Processed")
 modelPath = outputPath / "realtime" / "fusion_gb.json"
+# PIR-only backup: used live ONLY while no thermal frames are received
+backupModelPath = outputPath / "realtime" / "pir_backup_gb.json"
 
 
 # Output Folder Name For This Run (never overwrites an earlier run)
@@ -81,6 +91,18 @@ def runTrain(runName, folder, window):
     tuned = tuneThresholds(evalData, scores)
     path = model.save(modelPath, window, tuned["thresholds"])
     print(f"Saved real-time model to {path}")
+
+    # PIR-only backup: same training rows, same settings, same threshold tuning,
+    # but only the PIR feature columns (the live system uses it only without thermal frames)
+    backupNames = getHistoryFeatureNames()
+    print("Training the first-principles PIR-only backup Gradient Boosting...")
+    backup = GradientBoosting().fit(trainData[backupNames].to_numpy(dtype=float),
+                                    trainData[LABEL_COLUMN].to_numpy(), backupNames, progress=print)
+    backupScores = backup.predictProba(evalData[backupNames].to_numpy(dtype=float))
+    print("Tuning PIR-only backup alarm thresholds on validation...")
+    backupTuned = tuneThresholds(evalData, backupScores)
+    backupPath = backup.save(backupModelPath, window, backupTuned["thresholds"])
+    print(f"Saved PIR-only backup model to {backupPath}")
     # Keep the playback review files in step with the newest model
     from Tools.export_review_predictions import exportAll
     exportAll(modelPath)
@@ -133,7 +155,8 @@ def runTest(runName, folder):
 def runSummary(runName, folder):
     folder.mkdir(parents=True, exist_ok=False)
     lines, table, tex = datasetSummary(
-        {"Training": trainingDataset, "Validation": validationDataset, "Testing": testingDataset})
+        {"Training": trainingDataset, "Validation": validationDataset, "Testing": testingDataset,
+         "Other sites": otherSitesDataset})
     text = "\n".join([f"DATASET SUMMARY: {runName}", *lines]) + "\n"
     (folder / "report.txt").write_text(text, encoding="utf-8")
     table.to_csv(folder / "recordings.csv", index=False)
@@ -152,16 +175,23 @@ if __name__ == "__main__":
                        help="Train, tune and export the first-principles Gradient Boosting")
     group.add_argument("--test", action="store_true",
                        help=f"Final verification of {modelPath} on the testing recordings")
+    group.add_argument("--demo", action="store_true",
+                       help="Train on every recording for the demo and export both real-time models")
     group.add_argument("--summary", action="store_true",
                        help="Recordings, durations and labelled minutes of every dataset split")
-    parser.add_argument("--window", type=float, default=1.0, help="Fusion window for --train (seconds)")
+    parser.add_argument("--window", type=float, default=None,
+                        help="Fusion window in seconds (--train default 1.0, --demo default 2.0)")
     args = parser.parse_args()
 
     runName, folder = outputFolder(args.name)
     if args.compare:
         runCompare(runName, folder)
     elif args.train:
-        runTrain(runName, folder, args.window)
+        runTrain(runName, folder, args.window if args.window is not None else 1.0)
+    elif args.demo:
+        from Fusion.demoTraining import runDemoTraining, DEMO_WINDOW_S
+        print("\n" + runDemoTraining(runName, folder, args.window if args.window is not None else DEMO_WINDOW_S,
+                                     modelPath, backupModelPath))
     elif args.summary:
         runSummary(runName, folder)
     else:

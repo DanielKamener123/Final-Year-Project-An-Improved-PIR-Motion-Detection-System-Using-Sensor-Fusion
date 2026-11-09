@@ -5,3 +5,5 @@ __pycache__/
 
 Processed/**/*.png
 Processed/**/*.tex
+Processed/**/*.csv
+Processed/**/*.txt

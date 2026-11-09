@@ -35,6 +35,21 @@ Accepted data-type shortcuts are `train`/`training`, `val`/`validation` and `tes
 
 After you enter a unique recording name, the PC connects to the ROCK, waits for sensor readiness, warms up the camera, synchronises the clocks and schedules recording automatically. Keep the monitored area empty during sensor calibration. Once recording begins, type `stop` to finish.
 
+## 2b. GUI collector (camera optional, live labels)
+
+```bash
+python -m Collection.pc_collector_gui --host <ROCK_IP> --camera 1
+```
+
+Arguments only pre-fill the form (`--no-camera` starts with the camera unticked).
+
+1. Choose the data type, type a new recording name, check the ROCK IP, tick/untick **Record camera** (use **Test camera** to check the index).
+2. **Connect + calibrate** - keep the area empty while the ROCK calibrates.
+3. **Start recording**. Press **SPACE** (or the Enter/Leave button) when someone enters the inbound zone and again when it is empty. **Undo last press** removes a mistake.
+4. **Stop + save**. Labels are written straight to `labels.csv` (same format as the playback tool), and can still be refined in `Tools.synchronised_playback` if a video was recorded.
+
+If the camera is missing or drops out, recording continues sensors-only and `metadata.json` records it (`camera_used`, `camera_error`, `camera_lost_during_recording`). A silent PIR/thermopile or lost ROCK connection still stops the recording.
+
 ## 3. Recording folder layout
 
 A recording is saved directly inside the folder you named, under its data type:

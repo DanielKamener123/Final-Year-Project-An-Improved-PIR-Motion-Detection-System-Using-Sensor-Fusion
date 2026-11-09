@@ -16,15 +16,37 @@ REFRESH_RATES = {
     64.0: adafruit_mlx90640.RefreshRate.REFRESH_64_HZ,
 }
 
-i2c = adafruit_extended_bus.ExtendedI2C(I2C_BUS)
-
-mlx = adafruit_mlx90640.MLX90640(i2c)
-mlx.refresh_rate = REFRESH_RATES[REFRESH_RATE_HZ]
+# The Sensor Is Opened On The First Read (not on import), so a missing or
+# unplugged thermopile no longer stops main.py from starting. After an I2C
+# failure the connection is dropped and re-opened on the next read.
+i2c = None
+mlx = None
 
 frame_buffer = [0.0] * 768  # 32 x 24
 
+# Opens The Thermopile On The I2C Bus
+def connect():
+    global i2c, mlx
+    i2c = adafruit_extended_bus.ExtendedI2C(I2C_BUS)
+    sensor = adafruit_mlx90640.MLX90640(i2c)
+    sensor.refresh_rate = REFRESH_RATES[REFRESH_RATE_HZ]
+    mlx = sensor
+
+# Forgets The Connection So The Next Read Re-Opens The Sensor
+def disconnect():
+    global i2c, mlx
+    mlx = None
+    if i2c is not None:
+        try:
+            i2c.deinit()
+        except Exception:
+            pass
+    i2c = None
+
 # Reads Frame From Thermopile
 def getFrame():
+    if mlx is None:
+        connect()
     for attempt in range(5):
         try:
             mlx.getFrame(frame_buffer)
@@ -33,6 +55,10 @@ def getFrame():
             # Transient MLX90640 frame error; do not retry forever.
             if attempt == 4:
                 raise
+        except OSError:
+            # I2C failure (e.g. sensor unplugged): re-open on the next call
+            disconnect()
+            raise
     raise RuntimeError("Unable to acquire thermopile frame")
 
 # Reads Frames For Background Calibration - Make Sure No One Is In Frame
