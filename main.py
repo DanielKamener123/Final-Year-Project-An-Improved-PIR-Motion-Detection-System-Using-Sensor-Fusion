@@ -16,7 +16,7 @@ from PIR.interface import PIRAcquisition, sampleRateHz
 from PIR.processing import PIRProcessor, warmupTime, threshold as PIR_THRESHOLD
 from Thermopile.interface import getFrame, REFRESH_RATE_HZ
 from Thermopile.processing import ThermopilePipeline, FRAME_SHAPE
-from Fusion.realtimeModel import RealtimeModel, MODE_FUSED, MODE_PIR_BACKUP
+from Fusion.realtimeModel import RealtimeModel, MODE_FUSED, MODE_PIR_BACKUP, NO_INTRUDER
 
 # Live calibration matches the recordings (Collection/rock_agent.py): the first
 # N_WARMUP_FRAMES frames after start-up are thrown away, then the background and
@@ -276,7 +276,7 @@ class MainView(tk.Frame):
         footer = tk.Frame(self, bg=THEME["bg"])
         footer.pack(fill="x", pady=(14, 0))
         makeButton(footer, fonts, "Sensor view  ›     Space", on_toggle).pack(side="right")
-        tk.Label(footer, text="E  person enters     R  reset     F11  full screen", bg=THEME["bg"],
+        tk.Label(footer, text="E  person enters     R  reset     C  recalibrate (zone empty)     F11  full screen", bg=THEME["bg"],
                  fg=THEME["muted"], font=fonts["small_bold"]).pack(side="right", padx=16)
         self.status = tk.Label(footer, text="", bg=THEME["bg"], fg=THEME["muted"], font=fonts["small"], anchor="w")
         self.status.pack(side="left", fill="x", expand=True)
@@ -596,6 +596,8 @@ class LiveGUI:
         root.bind_all("<KeyPress-E>", lambda _event: self.system.mark_entry())
         root.bind_all("<KeyPress-r>", lambda _event: self.reset())
         root.bind_all("<KeyPress-R>", lambda _event: self.reset())
+        root.bind_all("<KeyPress-c>", lambda _event: self.system.request_recalibration())
+        root.bind_all("<KeyPress-C>", lambda _event: self.system.request_recalibration())
         root.bind_all("<F11>", lambda _event: self.set_fullscreen(not self.fullscreen))
         root.bind_all("<Escape>", lambda _event: self.set_fullscreen(False))
         self.fullscreen = False
@@ -667,6 +669,8 @@ class RealTimeSystem:
         self.pirProcessor = PIRProcessor(self.acquisitionQueue, windowTime=self.window)
         self.thermal = ThermopilePipeline(window_seconds=self.window)
         self.stopEvent = threading.Event()
+        # C key: recalibrate the thermal background on the next frames (zone must be empty)
+        self.recalibrateEvent = threading.Event()
         self.lock = threading.Lock()
         self.latest = {"warmup": "Preparing sensors...", "status": "Starting"}
         # Thermal frames are read on their own thread so a failed or hung read never
@@ -713,6 +717,12 @@ class RealTimeSystem:
             self.entry = {"time": now, "fused_s": None, "pir_s": None}
             self.events.append({"kind": "entry", "time": now})
         print(time.strftime("[%H:%M:%S] ") + "Entry marked - timing fused system and thresholded PIR", flush=True)
+
+    # C Key: take a new thermal background (setup only - nobody may be in view)
+    def request_recalibration(self):
+        self.recalibrateEvent.set()
+        print(time.strftime("[%H:%M:%S] ") + "Recalibrating thermopile - keep the detection zone EMPTY "
+              f"for the next {CALIBRATION_FRAMES} frames", flush=True)
 
     def clear_entry(self):
         with self.lock:
@@ -777,7 +787,8 @@ class RealTimeSystem:
         data = {"saved": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "frame_shape": list(self.thermal.frame_shape),
                 "background": self.thermal.bg_model.bg.reshape(-1).astype(float).tolist(),
-                "sigma": self.thermal.bg_model.sigma.reshape(-1).astype(float).tolist()}
+                # Uncorrected calibration sigma (same as the recordings); loading applies the denoise scale
+                "sigma": self.thermal.bg_model.calibration_sigma.reshape(-1).astype(float).tolist()}
         self.backgroundPath.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.backgroundPath.with_suffix(".tmp")
         temporary.write_text(json.dumps(data), encoding="utf-8")
@@ -952,6 +963,22 @@ class RealTimeSystem:
             if frame is not None:
                 gap = lastFrameTime is not None and timestamp - lastFrameTime > THERMAL_TIMEOUT_S
                 lastFrameTime = timestamp
+
+                # C key pressed: start a fresh calibration (no start-up frames to discard)
+                if self.recalibrateEvent.is_set():
+                    self.recalibrateEvent.clear()
+                    calibrations = []
+                    discarded = CALIBRATION_DISCARD_FRAMES
+                    calibrated = False
+                    startupFailed = False
+                    fusedActive = False
+                    validSince = None
+                    # Old alarm is not carried over; the fused card shows warm-up until it is ready again
+                    for machine in (self.model.fusion_state, self.model.backup_state):
+                        if machine is not None:
+                            machine.state = NO_INTRUDER
+                            machine.below_since = None
+                    self.publish(fusion_state="", fusion_confidence=None)
 
                 if not calibrated and not startupFailed and not gap:
                     # Normal start-up calibration

@@ -46,12 +46,29 @@ THRESHOLD_FLOOR = 1.2     # Thresholds are only ever RAISED above the old value
 # Demo Setting: One Fixed Z Threshold For Every Pixel Instead Of The Temperature Table.
 # The table raised the threshold to ~4.5-7 in cold scenes (17 C) and the thermopile
 # missed 81% of the walks there; at 27 C it was too low and flagged most empty frames.
-# Fixed values chosen by leave-one-recording-out comparison (cold venue, driveway, hot uni):
-# best detection with the least alarmed time in the empty recordings.
 # These are the effective thresholds (the table path scales its values by 0.8).
+# 10 Nov: raised from 1.6 / 1.84. At the exam venue Z 1.6 put a blob on the empty
+# ground in 68% of frames; Z 2.2 drops that to ~3% while the fused system (PIR
+# carries most detections) keeps 180/183 held-out venue walks and cuts INTRUDER
+# time in the empty venue minutes from 57% to 21%.
+# 10 Nov (evening): raised to 3.0 / 3.45 together with GROUP_DENOISE below. With the
+# read-out pattern removed the noise is ~0.2 C instead of ~0.55 C, so Z 3.0 sees more
+# walkers than Z 2.2 did and the empty ground stays quiet (Z 2.8 and below: many blobs).
 USE_FIXED_THRESHOLD = True
-FIXED_Z_RAW = 1.6         # current-frame detector
-FIXED_Z_AVG = 1.84        # recent-frame-average detector
+FIXED_Z_RAW = 3.0         # current-frame detector
+FIXED_Z_AVG = 3.45        # recent-frame-average detector (same 1.15 ratio as before)
+
+# Read-out pattern correction: the MLX90640 reads pixels in an interleaved chess pattern and
+# pixels in the same (chess parity, column mod 4) group share a common per-frame offset.
+# Removing each group's offset every frame (median over quiet pixels, like the whole-scene
+# shift) cuts per-pixel noise from ~0.55 C to ~0.2 C in empty scenes.
+GROUP_DENOISE = True
+# Saved/sent calibration sigma is always the plain (uncorrected) per-pixel std, so old
+# recordings, new recordings and the live system all use sigma = saved sigma x this scale.
+DENOISE_SIGMA_SCALE = 0.4
+_rows, _cols = np.indices((HEIGHT, WIDTH))
+PIXEL_GROUP = ((_rows + _cols) % 2) * 4 + (_cols % 4)
+PIXEL_GROUPS = [PIXEL_GROUP == g for g in range(8)]
 THRESHOLD_TABLE_RAW = [
     (13.0, 15.49),
     (15.0, 9.11),
@@ -82,12 +99,12 @@ THRESHOLD_TABLE_AVG = [
 # Fix 5 - Second detector on the average of recent frames (Trofimova et al.
 # filter each pixel over time). Noise shrinks by sqrt(n); a slow, faint person
 # does not. A pixel is foreground if EITHER detector fires.
-AVG_WINDOW_S = 0.6        # 3 frames at 4 Hz, 2 frames at 2 Hz
+AVG_WINDOW_S = 0.8        # 2 frames at ~2 Hz (0.8 not 0.6: still works if live frames slow past 0.6 s)
 
 # Fix 6 - Confirmation (M-of-N): a blob is only reported if its track was seen
 # in at least CONFIRM_M frames within CONFIRM_WINDOW_S, unless it is strong.
 CONFIRM_M = 2
-CONFIRM_WINDOW_S = 0.6
+CONFIRM_WINDOW_S = 0.8     # was 0.6, same reason as AVG_WINDOW_S
 STRONG_RATIO = 1.5        # Peak score >= 1.5 x its threshold -> report immediately
 CONFIRM_MAX_STEP_PX = 9.0 # A faint blob only counts as "seen again" if it is
                           # within this distance of its track's last centre
@@ -161,19 +178,26 @@ class BackgroundModel:
     def __init__(self, shape):
         self.bg = np.zeros(shape)
         self.sigma = np.full(shape, SIGMA_MIN)
+        self.calibration_sigma = np.full(shape, SIGMA_MIN)   # uncorrected sigma, the one that is saved/sent
         self._initialised = False
+
+    # Working Sigma From The Saved (uncorrected) Calibration Sigma
+    def _set_sigma(self, calibration_sigma):
+        self.calibration_sigma = np.asarray(calibration_sigma, dtype=np.float64).reshape(self.bg.shape).copy()
+        sigma = self.calibration_sigma * DENOISE_SIGMA_SCALE if GROUP_DENOISE else self.calibration_sigma
+        self.sigma = np.maximum(sigma, SIGMA_MIN)
 
     # Calibrate Background
     def calibration(self, calibration_frames):
         self.bg[:] = np.median(calibration_frames, axis=0)
         measured_sigma = calibration_frames.std(axis=0)
-        self.sigma = np.maximum(measured_sigma, SIGMA_MIN)
+        self._set_sigma(measured_sigma)
         self._initialised = True
 
     # Load A Saved Background
     def load(self, background, sigma):
         self.bg[:] = np.asarray(background, dtype=np.float64).reshape(self.bg.shape)
-        self.sigma = np.maximum(np.asarray(sigma, dtype=np.float64).reshape(self.bg.shape), SIGMA_MIN)
+        self._set_sigma(sigma)
         self._initialised = True
 
     # Update Background
@@ -191,6 +215,18 @@ class BackgroundModel:
         new_sigma = np.sqrt(new_sigma_sq)
         new_sigma = np.maximum(new_sigma, SIGMA_MIN)
         self.sigma = np.where(update_mask, new_sigma, self.sigma)
+
+    # Read-Out Pattern - Each Pixel Group's Offset (median over quiet pixels of that group)
+    def group_shift(self, frame, previous_mask):
+        difference = frame - self.bg
+        quiet = ~grow_mask(previous_mask)
+        shift = np.zeros_like(difference)
+        for group in PIXEL_GROUPS:
+            values = difference[group & quiet]
+            if values.size < MIN_QUIET_FRACTION * np.count_nonzero(group):
+                values = difference[group]
+            shift[group] = np.median(values)
+        return shift
 
     # Fix 2 - Measure The Whole-Scene Shift (first principles)
     # shift = median of (frame - background) over "quiet" pixels: pixels that
@@ -617,7 +653,11 @@ class ThermopilePipeline:
 
         # Fix 2: move the background with the scene. The Z score, temperature
         # difference and sigma update below all use the corrected difference.
-        self.bg_model.apply_shift(shift)
+        # Read-out pattern: each pixel group gets its own shift instead (includes the scene shift)
+        if GROUP_DENOISE:
+            self.bg_model.apply_shift(self.bg_model.group_shift(frame, self._prev_mask))
+        else:
+            self.bg_model.apply_shift(shift)
 
         # Step 2: Z Score (detector A: current frame)
         z = self.bg_model.z_score(frame)

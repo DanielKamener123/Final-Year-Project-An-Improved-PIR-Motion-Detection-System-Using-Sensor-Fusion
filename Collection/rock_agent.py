@@ -70,7 +70,8 @@ def calibrationData(processor, thermalPipeline, status):
         {
             KEY_THERMAL_FRAME_SHAPE: list(thermalPipeline.frame_shape),
             KEY_THERMAL_BACKGROUND: thermalPipeline.bg_model.bg.reshape(-1).astype(float).tolist(),
-            KEY_THERMAL_SIGMA: thermalPipeline.bg_model.sigma.reshape(-1).astype(float).tolist(),
+            # Uncorrected calibration sigma, so new recordings match the old ones (processing.py scales it)
+            KEY_THERMAL_SIGMA: thermalPipeline.bg_model.calibration_sigma.reshape(-1).astype(float).tolist(),
         }
     )
     return payload
