@@ -9,6 +9,20 @@ from Fusion.gradientBoosting import GradientBoosting
 STATES = ("NO INTRUDER", "MAYBE INTRUDER", "INTRUDER")
 NO_INTRUDER, MAYBE_INTRUDER, INTRUDER = 0, 1, 2
 
+# PIR Strong-Signal Rule (11 Nov): a PIR peak-to-peak this large in the fusion window is always a
+# person moving, so the confidence is set to 1 (INTRUDER). The largest value in the empty exam-venue
+# recordings is 1.33 V (99.9th percentile 0.76 V); fast passes have a median of 2.24 V.
+# 2.0 V keeps a 50% margin above anything seen in an empty scene.
+USE_PIR_STRONG_RULE = True
+PIR_STRONG_V = 2.0
+
+
+# Applies The PIR Strong-Signal Rule To Confidences (single value or array)
+def applyPirStrongRule(scores, pirPeakToPeak):
+    if not USE_PIR_STRONG_RULE:
+        return scores
+    return np.where(np.asarray(pirPeakToPeak, dtype=np.float64) > PIR_STRONG_V, 1.0, scores)
+
 class StateMachine:
     def __init__(self, thresholds):
         self.maybe_enter = float(thresholds["maybe_enter"])
@@ -122,9 +136,13 @@ class RealtimeModel:
         self._switch_mode(mode)
         if mode == MODE_FUSED:
             fusion_score = self.fusion.confidence(row)
-            fusion_state = self.fusion_state.update(fusion_score, timestamp)
         else:
             fusion_score = self.backup.confidence(row)
+        # PIR strong-signal rule (same rule as the demo training)
+        fusion_score = float(applyPirStrongRule(fusion_score, row["pirPeakToPeak"]))
+        if mode == MODE_FUSED:
+            fusion_state = self.fusion_state.update(fusion_score, timestamp)
+        else:
             fusion_state = self.backup_state.update(fusion_score, timestamp)
         return {
             "pir_state": "INTRUDER" if pir_active else "NO INTRUDER",

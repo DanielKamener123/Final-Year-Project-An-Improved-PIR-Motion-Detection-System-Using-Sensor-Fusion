@@ -26,6 +26,10 @@
 7. demo_report.txt (venue only), demo_tradeoff_*.csv (every setting) and demo_scores_*.csv
    (held-out scores) are written so another operating point can be chosen without retraining.
 
+11 Nov: the final choice in step 5 is now the highest FRAME detection rate of moving people (frame Pd),
+then the most walks. Still rows (no motion on either sensor) are left out of training and frame Pd,
+short passes keep their rows, and the PIR strong-signal rule is applied to the held-out scores.
+
 Venue recordings: recordings outside Datasets/old whose name starts with one of VENUE_PREFIXES
 (exam venue "Uni...", backup site "Backup..."). Recordings whose name contains Empty,
 Distractor or Negative (or that have no labelled walks) are empty recordings. A recording may
@@ -40,7 +44,7 @@ import pandas as pd
 from Fusion.dataset import buildRecordingDataset, getFusedFeatureNames
 from Fusion.gradientBoosting import GradientBoosting
 from Fusion.models import buildModels, confidenceScores
-from Fusion.realtimeModel import StateMachine, INTRUDER, MAYBE_INTRUDER, NO_INTRUDER
+from Fusion.realtimeModel import StateMachine, INTRUDER, MAYBE_INTRUDER, NO_INTRUDER, applyPirStrongRule, PIR_STRONG_V
 from PIR.processing import getHistoryFeatureNames
 
 # Config
@@ -70,6 +74,16 @@ ALARM_TOLERANCE = 1.0
 # considered (on Demo_v3 this gives hold 2 s: 2.22 -> 1.63 segments, same false-alarm events, each 2 s longer)
 MAX_SEGMENTS = 1.7
 MAX_DELAY_S = 10.0           # a walk counts as detected if INTRUDER within 10 s of entry
+# Motion-only demo changes (11 Nov)
+# Short (fast) passes: every row of a pass shorter than 2 s was within BOUNDARY_S of its start or end,
+# so runners were never trained on. For passes shorter than SHORT_WALK_S only the rows just OUTSIDE
+# the pass are dropped; the rows inside are kept.
+SHORT_WALK_S = 3.0
+# Still frames: human-labelled rows where neither sensor shows any motion (PIR peak-to-peak and the
+# thermal frame difference below the venue's empty-scene 99th percentile, no moving thermal blob).
+# The system only has to detect motion, so these rows (mostly people standing) are left out of
+# training and out of the frame-based detection rate.
+STILL_PERCENTILE = 99.0
 
 
 # Every Recording Folder Under The Demo Datasets (folders with metadata.json)
@@ -113,6 +127,11 @@ def buildDemoData(window, progress=print):
         near = np.zeros(len(data), dtype=bool)
         closeToWalk = np.zeros(len(data), dtype=bool)
         for start, end in walks:
+            if end - start < SHORT_WALK_S:
+                # Short pass: keep the rows inside, drop only the rows just outside
+                near |= ((times >= start - BOUNDARY_S) & (times < start)) | \
+                        ((times > end) & (times <= end + BOUNDARY_S))
+                continue
             near |= (np.abs(times - start) <= BOUNDARY_S) | (np.abs(times - end) <= BOUNDARY_S)
             closeToWalk |= ((times >= start - CLEAN_NEGATIVE_S) & (times < start)) | \
                            ((times > end) & (times <= end + CLEAN_NEGATIVE_S))
@@ -146,6 +165,26 @@ def buildDemoData(window, progress=print):
                  f"{' (empty)' if empty else ''}{' (+empty.csv)' if known.any() else ''}"
                  f"{' (+outbound)' if outbound.any() else ''}")
     return pd.concat(parts, ignore_index=True)
+
+
+# Marks Human Rows Where Neither Sensor Shows Motion (left out of training and frame Pd)
+def markStillRows(data, progress=print):
+    venueEmpty = (data["venue"] & data["emptyTime"]).to_numpy()
+    reference = venueEmpty if venueEmpty.any() else data["emptyTime"].to_numpy()
+    if not reference.any():
+        progress("  WARNING: no empty time to set the still-row limits; no rows marked still")
+        data["still"] = False
+        return data
+    pirLimit = float(np.percentile(data.loc[reference, "pirPeakToPeak"], STILL_PERCENTILE))
+    fdLimit = float(np.percentile(data.loc[reference, "thermalFdWindowMaxEnergy"], STILL_PERCENTILE))
+    still = (data["human"].to_numpy() == 1) & (data["pirPeakToPeak"].to_numpy() < pirLimit) & \
+            (data["thermalNumberOfBlobs"].to_numpy() == 0) & (data["thermalFdWindowMaxEnergy"].to_numpy() < fdLimit)
+    data["still"] = still
+    data["train"] = data["train"].to_numpy() & ~still
+    human = int((data["human"] == 1).sum())
+    progress(f"  still rows (no PIR peak-to-peak >= {pirLimit:.2f} V, no moving blob, frame difference < "
+             f"{fdLimit:.3f}): {int(still.sum())} of {human} human rows left out")
+    return data
 
 
 # Training Matrix With Venue And Empty Rows Repeated FOCUS_WEIGHT Times
@@ -229,11 +268,16 @@ def recordingResults(data, states):
                 segments.append(int(inside.any()) + int(np.sum(inside[1:] & ~inside[:-1])) if inside.size else 0)
         step = np.clip(np.diff(t, prepend=t[0]), 0.0, 1.0)
         emptyRows = emptyTime[idx]
+        # Frame-based detection: human rows that are not still and not at a label boundary
+        moving = (data["human"].to_numpy()[idx] == 1) & ~data["nearBoundary"].to_numpy()[idx]
+        if "still" in data:
+            moving &= ~data["still"].to_numpy()[idx]
         rows.append({
             "recording": Path(recording).name, "empty": empty, "walks": walks, "detected": detected,
             "delays": delays, "segments": segments, "empty_s": step[emptyRows].sum(),
             "alarmed_s": step[emptyRows & (st >= MAYBE_INTRUDER)].sum(),
             "intruder_s": step[emptyRows & intruder].sum(),
+            "moving_frames": int(moving.sum()), "moving_intruder": int((moving & intruder).sum()),
         })
     return pd.DataFrame(rows)
 
@@ -244,7 +288,9 @@ def summarise(results):
     emptySeconds = float(results["empty_s"].sum())
     delays = [d for row in results["delays"] for d in row]
     segments = [s for row in results["segments"] for s in row]
+    movingFrames = int(results["moving_frames"].sum())
     return {
+        "frame_pd": 100.0 * results["moving_intruder"].sum() / movingFrames if movingFrames else float("nan"),
         "walks": walks, "detected": detected, "pd": 100.0 * detected / walks if walks else float("nan"),
         "delay": float(np.median(delays)) if delays else float("nan"),
         "segments": float(np.mean(segments)) if segments else float("nan"),
@@ -286,21 +332,22 @@ def chooseSettings(venueData, scores, progress=print):
     if not noEmpty:
         # Differences in false alarms smaller than ALARM_TOLERANCE points are noise: take the most walks
         ok = ok[ok["alarmed"] <= ok["alarmed"].min() + ALARM_TOLERANCE]
-    best = ok.sort_values(["pd", "alarmed", "intruder", "segments"], ascending=[False, True, True, True],
-                          na_position="last").iloc[0]
+    # Frame-based (11 Nov): among those, the highest frame detection rate of moving people
+    best = ok.sort_values(["frame_pd", "pd", "alarmed", "intruder", "segments"],
+                          ascending=[False, False, True, True, True], na_position="last").iloc[0]
     keys = ("maybe_enter", "maybe_exit", "intruder_enter", "intruder_exit", "hold_s")
     settings = {k: float(best[k]) for k in keys}
     progress(f"  chosen: INTRUDER {settings['intruder_enter']}/{settings['intruder_exit']}, "
              f"MAYBE {settings['maybe_enter']}/{settings['maybe_exit']}, hold {settings['hold_s']:g} s -> "
              f"venue walks {int(best['detected'])}/{int(best['walks'])} ({int(best['detected_lower'])} with scores "
-             f"{ROBUST_SHIFT:g} lower), empty venue alarmed {best['alarmed']:.1f}%")
+             f"{ROBUST_SHIFT:g} lower), frame Pd {best['frame_pd']:.1f}%, empty venue alarmed {best['alarmed']:.1f}%")
     return settings, table
 
 
 # Trade-Off Lines: fewest false alarms reachable at each venue detection level
 def tradeOffLines(name, table, chosen):
     lines = [f"{name}: fewest false alarms at each venue detection level (held-out)",
-             f"{'walks':>9s} {'detect %':>8s} {'empty alarmed %':>15s} {'INTRUDER %':>10s} {'segs/walk':>9s} "
+             f"{'walks':>9s} {'detect %':>8s} {'frame Pd %':>10s} {'empty alarmed %':>15s} {'INTRUDER %':>10s} {'segs/walk':>9s} "
              f"{'delay s':>7s} {f'walks if scores {ROBUST_SHIFT:g} lower':>26s}  setting"]
     isChosen = np.all([np.abs(table[k] - v) < 1e-9 for k, v in chosen.items()], axis=0)
     best = table.sort_values(["alarmed", "intruder"]).drop_duplicates("detected").sort_values("pd", ascending=False)
@@ -309,7 +356,7 @@ def tradeOffLines(name, table, chosen):
         best = pd.concat([best, table[isChosen]]).sort_values(["pd", "alarmed"], ascending=[False, True])
     for _, row in best.iterrows():
         mark = "  <- chosen" if all(abs(row[k] - v) < 1e-9 for k, v in chosen.items()) else ""
-        lines.append(f"{int(row['detected']):>4d}/{int(row['walks']):<4d} {row['pd']:8.1f} {row['alarmed']:15.1f} "
+        lines.append(f"{int(row['detected']):>4d}/{int(row['walks']):<4d} {row['pd']:8.1f} {row['frame_pd']:10.1f} {row['alarmed']:15.1f} "
                      f"{row['intruder']:10.1f} {row['segments']:9.2f} {row['delay']:7.1f} "
                      f"{int(row['detected_lower']):>22d}/{int(row['walks']):<3d}  "
                      f"INTRUDER {row['intruder_enter']}/{row['intruder_exit']} MAYBE {row['maybe_enter']}/"
@@ -331,6 +378,8 @@ def reportLines(title, systems):
         parts = []
         if summary["walks"]:
             parts.append(f"walks {summary['detected']}/{summary['walks']}")
+            if not np.isnan(summary["frame_pd"]):
+                parts.append(f"frame Pd {summary['frame_pd']:.0f}%")
             if not np.isnan(summary["segments"]):
                 parts.append(f"{summary['segments']:.1f} seg")
         if summary["empty_min"]:
@@ -351,6 +400,7 @@ def runDemoTraining(runName, folder, window, modelPath, backupPath, progress=pri
     folder.mkdir(parents=True, exist_ok=False)
     progress(f"Building features ({window:g} s window) for every demo recording...")
     data = buildDemoData(window, progress)
+    data = markStillRows(data, progress)
     venue = data["venue"].to_numpy()
     if not venue.any():
         raise ValueError(f"No venue recordings found (names starting with {VENUE_PREFIXES} outside Datasets/old)")
@@ -366,6 +416,8 @@ def runDemoTraining(runName, folder, window, modelPath, backupPath, progress=pri
                                       ("PIR-only backup", getHistoryFeatureNames(), backupPath, "pir_backup")):
         progress(f"\n{name}: held-out scores for each venue recording...")
         scores = heldOutScores(data, features, progress)[venue]
+        # PIR strong-signal rule: the same rule the live system applies (Fusion/realtimeModel.py)
+        scores = applyPirStrongRule(scores, venueData["pirPeakToPeak"].to_numpy())
         pd.DataFrame({"recording": venueData["session"], "time_s": venueData["fusionTime"],
                       "human": venueData["human"], "emptyTime": venueData["emptyTime"], "score": scores}) \
             .to_csv(folder / f"demo_scores_{tag}.csv", index=False)
@@ -394,9 +446,12 @@ def runDemoTraining(runName, folder, window, modelPath, backupPath, progress=pri
              "(1.0 = no fragmentation). Empty alarmed = MAYBE or INTRUDER time in empty venue time "
              "(Empty/Distractor/Negative recordings and empty.csv stretches).",
              f"Rule: settings detecting >= {MIN_DETECTION:g}% of venue walks and >= {ROBUST_DETECTION:g}% with every "
-             f"score {ROBUST_SHIFT:g} lower and <= {MAX_SEGMENTS:g} INTRUDER segments per walk; of those within {ALARM_TOLERANCE:g} points of the fewest false alarms, the one detecting the "
-             f"most walks.",
-             f"Thermopile threshold: {_thresholdText()}.", ""]
+             f"score {ROBUST_SHIFT:g} lower and <= {MAX_SEGMENTS:g} INTRUDER segments per walk; of those within {ALARM_TOLERANCE:g} points of the fewest false alarms, the one with the "
+             f"highest frame Pd.",
+             f"Thermopile threshold: {_thresholdText()}.",
+             f"Motion only: human rows with no motion on either sensor are left out of training and frame Pd; "
+             f"PIR strong-signal rule: INTRUDER when PIR peak-to-peak > {PIR_STRONG_V:g} V.",
+             "frame Pd = INTRUDER frames / moving human frames (not still, not within the label boundary).", ""]
     for name, (settings, _) in outputs.items():
         lines.append(f"{name} alarm settings: INTRUDER on {settings['intruder_enter']} / off {settings['intruder_exit']}, "
                      f"MAYBE on {settings['maybe_enter']} / off {settings['maybe_exit']}, hold {settings['hold_s']:g} s")

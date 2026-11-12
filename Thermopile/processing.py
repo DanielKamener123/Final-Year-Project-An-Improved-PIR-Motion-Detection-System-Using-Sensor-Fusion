@@ -142,6 +142,45 @@ FD_FEATURE_NAMES = [
     "fdWindowActiveFraction", "fdValid",
 ]
 
+# Demo Changes (11 Nov) - Motion-Only Thermal Processing
+# The system only has to detect MOVING people, so anything warm that stays still
+# (an object, a sun-heated patch, a person standing) must stop counting.
+# Worst case that must still count as moving: 0.2 m/s at 10 m. 110 deg / 32 px = 3.4 deg
+# per pixel, so a centre pixel is ~0.6 m wide at 10 m and the walker moves ~0.33 px/s
+# (measured on Driveway_10m_Day very slow walks: ~0.5 px/s, 1.5 px in 4 s at the 10th
+# percentile) and keeps one pixel covered for at most ~5.1 s (measured).
+
+# Fix 8 - Absorb stuck pixels: a pixel that has been foreground for longer than ABSORB_S
+# fades into the background (background only, sigma untouched). Longer than the 5.1 s a
+# very slow walker covers a pixel, so a real walker is never absorbed.
+ABSORB_STUCK_PIXELS = True
+ABSORB_S = 6.0
+ALPHA_ABSORB = 0.9        # ~5 s time constant at 2 frames/s
+ABSORB_TAIL_S = 5.0       # keep absorbing a stuck pixel this long after it was last stuck, so the
+                          # half-absorbed edge does not flicker in and out as small new blobs
+
+# Fix 9 - Static gate: a track that has existed for STATIC_WINDOW_S and moved less than
+# STATIC_PX in that time is left out of every thermal feature. A static blob wobbles up to
+# ~1.1 px in 4 s; the slowest walker at 10 m moves ~1.5 px. Shorter windows cannot tell
+# them apart (3 s: walker 1.0 px vs static 1.2 px).
+STATIC_GATE = True
+STATIC_WINDOW_S = 4.0
+STATIC_PX = 1.5
+STATIC_PIXEL_SHARE = 0.5  # a blob mostly made of stuck pixels (Fix 8) is static too
+                          # (stops a blob that is fading into the background from looking like movement;
+                          # a walker never keeps a pixel for ABSORB_S, so walkers are never affected)
+
+# Fix 10 - Frame difference with the read-out pattern removed (same idea as GROUP_DENOISE):
+# each pixel group's common change is subtracted before the difference is used.
+# Empty scene: active pixels drop from ~403 of 768 to ~2.
+FD_DENOISE = True
+FD_NOISE_THRESHOLD_DENOISED_C = 0.6
+
+# Fix 11 - Runner gate: a faint blob counts as "seen again" with the same size-dependent
+# gate the tracker uses (Fix 7). A near runner moves ~14 px per frame, beyond the 9 px limit,
+# so the confirmation used to restart every frame.
+RUNNER_GATE = True
+
 def median(values):
     ordered = sorted(values)
     n = len(ordered)
@@ -201,9 +240,15 @@ class BackgroundModel:
         self._initialised = True
 
     # Update Background
-    def update(self, frame, foreground_mask):
+    def update(self, frame, foreground_mask, absorb_mask=None):
         #Inverts Foreground Mask To Get Background Mask
         update_mask = ~foreground_mask
+
+        # Fix 8: stuck pixels fade into the background (sigma is not changed)
+        if absorb_mask is not None and absorb_mask.any():
+            absorbed_bg = ALPHA_ABSORB * self.bg + (1 - ALPHA_ABSORB) * frame
+            self.bg = np.where(absorb_mask, absorbed_bg, self.bg)
+            update_mask = update_mask & ~absorb_mask
 
         # Updates Background Where No Humans
         new_bg = ALPHA * self.bg + (1 - ALPHA) * frame
@@ -419,6 +464,8 @@ class Track:
     traversed_px: float = 0.0
     history: list = None  # (timestamp, centre) pairs inside the window
     seen_times: list = None  # Fix 6: timestamps this track was detected
+    first_seen: float = None   # Fix 9: time the track started
+    long_history: list = None  # Fix 9: (timestamp, centre) pairs inside STATIC_WINDOW_S
 
 # Blob Feature Scoring
 @dataclass
@@ -560,6 +607,10 @@ class ThermopilePipeline:
         # Fix 3: the last good feature row (timestamp, features)
         self._track_positions = {}
         self._last_good_features = None
+        # Fix 8: how long each pixel has been foreground without a break
+        self.fg_time = np.zeros(frame_shape)
+        self._last_frame_time = None
+        self.absorb_until = np.full(frame_shape, -np.inf)   # Fix 8: absorb tail end time per pixel
 
     # Clears Everything Learned From Previous Frames (background is kept)
     def reset(self):
@@ -576,6 +627,9 @@ class ThermopilePipeline:
         self.difference_history.clear()
         self._track_positions = {}
         self._last_good_features = None
+        self.fg_time = np.zeros(self.frame_shape)
+        self._last_frame_time = None
+        self.absorb_until = np.full(self.frame_shape, -np.inf)
 
     # Get Background Without Human (live: frames from an empty scene)
     def calibrate(self, calibration_frames):
@@ -597,15 +651,28 @@ class ThermopilePipeline:
         if self.fd_frames and timestamp - self.fd_frames[-1][0] > FD_MAX_GAP_SECONDS:
             self.fd_frames.clear()
             self.fd_activity.clear()
-        filtered = gaussian_filter(np.asarray(frame, dtype=np.float64))
+        # Fix 10: keep the raw frame; the difference is denoised and then smoothed
+        if FD_DENOISE:
+            filtered = np.asarray(frame, dtype=np.float64)
+        else:
+            filtered = gaussian_filter(np.asarray(frame, dtype=np.float64))
         target = timestamp - FD_LAG_SECONDS
         previous = min(self.fd_frames, key=lambda item: abs(item[0] - target), default=None)
         data = {name: 0.0 for name in FD_FEATURE_NAMES}
         if previous is not None and previous[0] < timestamp and abs(previous[0] - target) <= 0.20:
-            absdiff = np.abs(filtered - previous[1])
+            if FD_DENOISE:
+                # Fix 10: remove each read-out group's common change, then smooth
+                change = filtered - previous[1]
+                for group in PIXEL_GROUPS:
+                    change[group] = change[group] - np.median(change[group])
+                absdiff = np.abs(gaussian_filter(change))
+                noise_threshold = FD_NOISE_THRESHOLD_DENOISED_C
+            else:
+                absdiff = np.abs(filtered - previous[1])
+                noise_threshold = FD_NOISE_THRESHOLD_C
             data.update(fdMeanAbs=float(absdiff.mean()), fdMaxAbs=float(absdiff.max()),
                         fdEnergy=float(np.mean(absdiff ** 2)),
-                        fdActivePixels=float(np.count_nonzero(absdiff > FD_NOISE_THRESHOLD_C)),
+                        fdActivePixels=float(np.count_nonzero(absdiff > noise_threshold)),
                         fdValid=1.0)
             self.fd_activity.append((timestamp, data["fdEnergy"], data["fdActivePixels"]))
         self.fd_frames.append((timestamp, filtered))
@@ -685,8 +752,20 @@ class ThermopilePipeline:
 
         temperature_difference = np.abs(difference)
 
+        # Fix 8: time each pixel has been foreground without a break
+        dt = 0.0
+        if self._last_frame_time is not None:
+            dt = min(max(now - self._last_frame_time, 0.0), 1.0)
+        self._last_frame_time = now
+        self.fg_time = np.where(mask, self.fg_time + dt, 0.0)
+        self.absorb_until = np.where(self.fg_time > ABSORB_S, now + ABSORB_TAIL_S, self.absorb_until)
+        stuck = now <= self.absorb_until
+
         # Steps 1: Update Background + Sigma
-        self.bg_model.update(frame, mask)
+        if ABSORB_STUCK_PIXELS:
+            self.bg_model.update(frame, mask, stuck)
+        else:
+            self.bg_model.update(frame, mask)
 
         # Step 5: Blob extraction (centre weighted by how far over threshold)
         blobs = extract_blobs(mask, weights=ratio)
@@ -733,10 +812,26 @@ class ThermopilePipeline:
             seen_times = list(track.seen_times) if track.seen_times is not None else []
             step_dr = blob.centroid[0] - track.centroid[0]
             step_dc = blob.centroid[1] - track.centroid[1]
-            if (step_dr * step_dr + step_dc * step_dc) ** 0.5 > CONFIRM_MAX_STEP_PX:
+            # Fix 11: bigger (nearer) blobs may jump further, same gate as the tracker
+            confirm_step = CONFIRM_MAX_STEP_PX
+            if RUNNER_GATE:
+                confirm_step = max(CONFIRM_MAX_STEP_PX, GATE_PER_SQRT_PX * (blob.pixel_count ** 0.5))
+            if (step_dr * step_dr + step_dc * step_dc) ** 0.5 > confirm_step:
                 seen_times = []           # jumped too far: not the same faint object
             seen_times.append(now)
             seen_times = [t for t in seen_times if now - t <= CONFIRM_WINDOW_S]
+
+            # Fix 9: static if the track is at least STATIC_WINDOW_S old and never moved
+            # STATIC_PX from where it is now, or if it is mostly made of stuck pixels
+            first_seen = track.first_seen if track.first_seen is not None else now
+            long_history = list(track.long_history) if track.long_history is not None else []
+            long_history.append((now, blob.centroid))
+            long_history = [item for item in long_history if now - item[0] <= STATIC_WINDOW_S]
+            is_static = (now - first_seen >= STATIC_WINDOW_S and
+                         pixels_traversed(blob.centroid, long_history) < STATIC_PX)
+            if not is_static:
+                stuck_share = np.count_nonzero(blob.mask & stuck) / blob.pixel_count
+                is_static = stuck_share >= STATIC_PIXEL_SHARE
 
             # Update Data From Tracked Blob
             updated_tracks[track.id] = Track(
@@ -747,6 +842,8 @@ class ThermopilePipeline:
                 traversed_px=traversed,
                 history=history,
                 seen_times=seen_times,
+                first_seen=first_seen,
+                long_history=long_history,
             )
 
             used_track_ids.add(track.id)
@@ -755,6 +852,10 @@ class ThermopilePipeline:
             # their track has been seen CONFIRM_M times in CONFIRM_WINDOW_S.
             peak_ratio = float(np.max(ratio[blob.mask]))
             confirmed = peak_ratio >= STRONG_RATIO or len(seen_times) >= CONFIRM_M
+
+            # Fix 9: static blobs are not reported (they are kept as tracks)
+            if STATIC_GATE and is_static:
+                confirmed = False
 
             # Store The Result For This Blob
             if confirmed:
@@ -833,7 +934,12 @@ class ThermopilePipeline:
         features = emptyThermalFeatures()
         features["thermalNumberOfBlobs"] = float(len(detections))
         features["thermalTotalForegroundPixels"] = float(sum(d.features.pixel_count for d in detections))
-        features["thermalMaxZ"] = float(np.max(self.last_smoothed_z))
+        if STATIC_GATE:
+            # Fix 9: largest Z inside the reported (moving) blobs only
+            features["thermalMaxZ"] = float(max((np.max(self.last_smoothed_z[d.blob.mask]) for d in detections),
+                                                default=0.0))
+        else:
+            features["thermalMaxZ"] = float(np.max(self.last_smoothed_z))
         features["thermalSceneTemperature"] = float(self.last_scene_temp)
         for name, value in self.fd_latest.items():
             features["thermal" + name[0].upper() + name[1:]] = value
