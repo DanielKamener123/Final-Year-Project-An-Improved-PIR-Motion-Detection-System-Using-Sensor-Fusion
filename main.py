@@ -29,7 +29,7 @@ CALIBRATION_FRAMES = 40
 # plus the processing time used for the response-time test)
 LOG_FOLDER = Path("Processed/live_logs")
 LOG_COLUMNS = ["timestamp", "pir_state", "fusion_state", "fusion_confidence",
-               "pir_relative_voltage", "processing_ms"]
+               "pir_relative_voltage", "processing_ms", "pir_threshold_v"]
 
 # Sensor Failure Handling
 # No thermal frame for this long -> PIR-only backup classifier (same 1 s gap at
@@ -44,6 +44,12 @@ PIR_TIMEOUT_S = 1.0
 DECISION_PERIOD_S = 1.0 / REFRESH_RATE_HZ
 # Most recent start-up background, reused when the thermopile is not working at start-up
 BACKGROUND_FILE = "thermal_background.json"
+
+# Thresholded PIR Comparison Level (Up / Down arrow keys or the - / + buttons change it live).
+# Only the thresholded-PIR comparison uses it; the fused system's PIR features keep PIR/processing.py's threshold.
+PIR_THRESHOLD_STEP_V = 0.05
+PIR_THRESHOLD_MIN_V = 0.05
+PIR_THRESHOLD_MAX_V = 1.60
 
 # Sensor View Settings
 PIR_DISPLAY_S = 15.0
@@ -131,9 +137,11 @@ class Card(tk.Frame):
         self.header.pack(fill="x")
         tk.Label(self.header, text=title, bg=THEME["card"], fg=THEME["text"],
                  font=fonts["card"]).pack(side="left", anchor="w")
+        self.subtitle = None
         if subtitle:
-            tk.Label(self, text=subtitle, bg=THEME["card"], fg=THEME["muted"], font=fonts["small"],
-                     anchor="w", justify="left").pack(fill="x", pady=(2, 8))
+            self.subtitle = tk.Label(self, text=subtitle, bg=THEME["card"], fg=THEME["muted"], font=fonts["small"],
+                                     anchor="w", justify="left")
+            self.subtitle.pack(fill="x", pady=(2, 8))
 
 
 class Lamps(tk.Canvas):
@@ -169,6 +177,15 @@ def makeButton(parent, fonts, text, command):
     return button
 
 
+def makeSmallButton(parent, fonts, text, command):
+    button = tk.Button(parent, text=text, command=command, takefocus=0, font=fonts["button"], width=2,
+                       bg=THEME["accent"], fg="white", activebackground=THEME["accent_hover"],
+                       activeforeground="white", relief="flat", bd=0, padx=4, pady=0, cursor="hand2")
+    button.bind("<Enter>", lambda _e: button.configure(bg=THEME["accent_hover"]))
+    button.bind("<Leave>", lambda _e: button.configure(bg=THEME["accent"]))
+    return button
+
+
 def stateText(state):
     return state if state in STATE_COLOURS else "UNAVAILABLE"
 
@@ -176,7 +193,7 @@ def stateText(state):
 class MainView(tk.Frame):
     """Fused system vs thresholded PIR, processing time and the fused detection log."""
 
-    def __init__(self, parent, fonts, on_toggle):
+    def __init__(self, parent, fonts, on_toggle, on_threshold):
         super().__init__(parent, bg=THEME["bg"], padx=22, pady=18)
         self.fonts = fonts
 
@@ -187,8 +204,7 @@ class MainView(tk.Frame):
         titles.pack(side="left")
         tk.Label(titles, text="Outdoor Intrusion Detection", bg=THEME["bg"], fg=THEME["text"],
                  font=fonts["title"]).pack(anchor="w")
-        tk.Label(titles, text="Live comparison on the same sensor data: thresholded PIR vs the fused "
-                              "PIR + thermopile system", bg=THEME["bg"], fg=THEME["muted"],
+        tk.Label(titles, text="Thresholded PIR vs Fused system", bg=THEME["bg"], fg=THEME["muted"],
                  font=fonts["body"]).pack(anchor="w")
         self.status_pill = tk.Label(header, text="STARTING", font=fonts["pill"], padx=12, pady=4,
                                     bg=THEME["raised"], fg=THEME["muted"])
@@ -201,8 +217,18 @@ class MainView(tk.Frame):
         cards.columnconfigure(1, weight=1, uniform="cards")
 
         left = Card(cards, fonts, "Thresholded PIR",
-                    f"Alarm when the PIR voltage moves more than ±{PIR_THRESHOLD:g} V from its baseline")
+                    f"Intruder when PIR is more than ±{PIR_THRESHOLD:g} V from its baseline")
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self.pir_card = left
+        # Live threshold control (also Up / Down arrow keys)
+        control = tk.Frame(left.header, bg=THEME["card"])
+        control.pack(side="right")
+        tk.Label(control, text="Threshold", bg=THEME["card"], fg=THEME["muted"], font=fonts["body"]).pack(side="left")
+        makeSmallButton(control, fonts, "−", lambda: on_threshold(-1)).pack(side="left", padx=(8, 4))
+        self.pir_threshold_text = tk.Label(control, text=f"{PIR_THRESHOLD:.2f} V", width=7, bg=THEME["raised"],
+                                           fg=THEME["text"], font=fonts["body_bold"], pady=2)
+        self.pir_threshold_text.pack(side="left")
+        makeSmallButton(control, fonts, "+", lambda: on_threshold(+1)).pack(side="left", padx=(4, 0))
         self.pir_lamps = Lamps(left, fonts, [("NO INTRUDER", THEME["green"]), ("INTRUDER", THEME["red"])])
         self.pir_lamps.pack(pady=(4, 0))
         self.pir_state = tk.Label(left, text="--", bg=THEME["card"], fg=THEME["muted"], font=fonts["state"])
@@ -275,8 +301,9 @@ class MainView(tk.Frame):
         # Footer
         footer = tk.Frame(self, bg=THEME["bg"])
         footer.pack(fill="x", pady=(14, 0))
-        makeButton(footer, fonts, "Sensor view  ›     Space", on_toggle).pack(side="right")
-        tk.Label(footer, text="E  person enters     R  reset     C  recalibrate (zone empty)     F11  full screen", bg=THEME["bg"],
+        makeButton(footer, fonts, "Sensor View", on_toggle).pack(side="right")
+        tk.Label(footer, text="E = Entry    R = Reset    C = Recalibrate    F = Full Screen",
+                 bg=THEME["bg"],
                  fg=THEME["muted"], font=fonts["small_bold"]).pack(side="right", padx=16)
         self.status = tk.Label(footer, text="", bg=THEME["bg"], fg=THEME["muted"], font=fonts["small"], anchor="w")
         self.status.pack(side="left", fill="x", expand=True)
@@ -292,6 +319,9 @@ class MainView(tk.Frame):
         elif event["kind"] == "entry":
             line = f"{clock}  ENTRY marked (E) - timing both systems"
             colour = THEME["accent"]
+        elif event["kind"] == "threshold":
+            line = f"{clock}  Thresholded PIR threshold set to ±{event['volts']:.2f} V"
+            colour = THEME["muted"]
         else:
             seconds = event["seconds"]
             verdict = "within" if seconds <= RESPONSE_LIMIT_S else "OVER"
@@ -301,6 +331,12 @@ class MainView(tk.Frame):
         self.log_list.itemconfigure(0, fg=colour)
         if self.log_list.size() > 200:
             self.log_list.delete(200, "end")
+
+    # Thresholded PIR Level On The Card (button value and the explanation line)
+    def show_threshold(self, volts):
+        self.pir_threshold_text.configure(text=f"{volts:.2f} V")
+        self.pir_card.subtitle.configure(
+            text=f"Alarm when the PIR voltage moves more than ±{volts:.2f} V from its baseline")
 
     # Clears The Log, Count And Timers For The Next Demo Trial (processing is not touched)
     def reset(self):
@@ -339,6 +375,9 @@ class MainView(tk.Frame):
         pir = item.get("pir_state", "")
         self.pir_lamps.set_state(pir)
         self.pir_state.configure(text=stateText(pir), fg=STATE_TEXT.get(pir, THEME["muted"]))
+        threshold = item.get("pir_threshold")
+        if threshold is not None:
+            self.show_threshold(threshold)
         voltage = item.get("pir_relative_voltage")
         self.pir_detail.configure(text="PIR signal  --" if voltage is None
                                   else f"PIR signal  {voltage:+.3f} V from baseline")
@@ -374,9 +413,9 @@ class SensorView(tk.Frame):
         titles = tk.Frame(header, bg=THEME["bg"])
         titles.pack(side="left")
         tk.Label(titles, text="Sensor View", bg=THEME["bg"], fg=THEME["text"], font=fonts["title"]).pack(anchor="w")
-        tk.Label(titles, text="The live sensor data the system is processing right now",
+        tk.Label(titles, text="Live Sensor Data",
                  bg=THEME["bg"], fg=THEME["muted"], font=fonts["body"]).pack(anchor="w")
-        makeButton(header, fonts, "‹  Main view     Space", on_toggle).pack(side="right", anchor="n", pady=4)
+        makeButton(header, fonts, "Main view", on_toggle).pack(side="right", anchor="n", pady=4)
 
         # Decision strip
         strip = tk.Frame(self, bg=THEME["card"], highlightthickness=1, highlightbackground=THEME["border"],
@@ -455,7 +494,7 @@ class SensorView(tk.Frame):
         pir = item.get("pir_state", "")
         self.pir_pill.configure(text=stateText(pir), bg=STATE_COLOURS.get(pir, THEME["off"]), fg="white")
 
-    def draw_pir(self, samples, baseline, initialised):
+    def draw_pir(self, samples, baseline, initialised, threshold=PIR_THRESHOLD):
         canvas = self.pir_canvas
         canvas.delete("all")
         width = max(int(canvas.winfo_width()), 200)
@@ -481,11 +520,11 @@ class SensorView(tk.Frame):
             return
         if initialised:
             # Baseline and the thresholded-PIR trigger levels
-            canvas.create_rectangle(left, y(baseline + PIR_THRESHOLD), right, y(baseline - PIR_THRESHOLD),
+            canvas.create_rectangle(left, y(baseline + threshold), right, y(baseline - threshold),
                                     fill="#dbeafe", outline="")
             canvas.create_line(left, y(baseline), right, y(baseline), fill=THEME["muted"], dash=(4, 4))
-            canvas.create_text(left + 6, y(baseline + PIR_THRESHOLD) - 3, anchor="sw",
-                               text=f"baseline ± {PIR_THRESHOLD:g} V threshold", fill=THEME["muted"], font=self.fonts["small"])
+            canvas.create_text(left + 6, y(baseline + threshold) - 3, anchor="sw",
+                               text=f"baseline ± {threshold:.2f} V threshold", fill=THEME["muted"], font=self.fonts["small"])
         times = np.array([s[0] for s in samples])
         raw = np.array([s[1] for s in samples])
         xs = right - (times[-1] - times) / PIR_DISPLAY_S * (right - left)
@@ -583,7 +622,7 @@ class LiveGUI:
             "pill": (family, 10, "bold"), "pill_large": (family, 12, "bold"), "button": (family, 11, "bold"),
             "mono": ("DejaVu Sans Mono", 10),
         }
-        self.main_view = MainView(root, fonts, self.toggle_view)
+        self.main_view = MainView(root, fonts, self.toggle_view, self.change_threshold)
         self.sensor_view = SensorView(root, fonts, self.toggle_view)
         self.main_view.pack(fill="both", expand=True)
         self.showing_sensors = False
@@ -598,7 +637,10 @@ class LiveGUI:
         root.bind_all("<KeyPress-R>", lambda _event: self.reset())
         root.bind_all("<KeyPress-c>", lambda _event: self.system.request_recalibration())
         root.bind_all("<KeyPress-C>", lambda _event: self.system.request_recalibration())
-        root.bind_all("<F11>", lambda _event: self.set_fullscreen(not self.fullscreen))
+        root.bind_all("<KeyPress-f>", lambda _event: self.set_fullscreen(not self.fullscreen))
+        root.bind_all("<KeyPress-F>", lambda _event: self.set_fullscreen(not self.fullscreen))
+        root.bind_all("<Up>", lambda _event: self.change_threshold(+1))
+        root.bind_all("<Down>", lambda _event: self.change_threshold(-1))
         root.bind_all("<Escape>", lambda _event: self.set_fullscreen(False))
         self.fullscreen = False
         for index in range(len(THERMAL_STAGES)):
@@ -642,13 +684,18 @@ class LiveGUI:
             fresh = bool(self.pir_trace) and time.time() - self.pir_trace[-1][0] <= PIR_TIMEOUT_S
             self.sensor_view.draw_decision(item)
             self.sensor_view.draw_pir(list(self.pir_trace) if fresh else [], processor.getBaseline(),
-                                      processor.initialised)
+                                      processor.initialised, self.system.model.pir_threshold)
             self.sensor_view.draw_thermal(self.system.stage_snapshot())
         self.root.after(250, self.refresh)
 
     def reset(self):
         self.system.clear_entry()
         self.main_view.reset()
+
+    # Up / Down Or - / +: changes the thresholded-PIR comparison level by one step
+    def change_threshold(self, steps):
+        volts = self.system.set_pir_threshold(self.system.model.pir_threshold + steps * PIR_THRESHOLD_STEP_V)
+        self.main_view.show_threshold(volts)
 
     def set_fullscreen(self, enabled):
         self.fullscreen = enabled
@@ -718,6 +765,16 @@ class RealTimeSystem:
             self.events.append({"kind": "entry", "time": now})
         print(time.strftime("[%H:%M:%S] ") + "Entry marked - timing fused system and thresholded PIR", flush=True)
 
+    # Sets The Thresholded-PIR Comparison Level (the fused system is not affected)
+    def set_pir_threshold(self, volts):
+        volts = round(min(max(float(volts), PIR_THRESHOLD_MIN_V), PIR_THRESHOLD_MAX_V), 2)
+        with self.lock:
+            if volts != self.model.pir_threshold:
+                self.model.pir_threshold = volts
+                self.events.append({"kind": "threshold", "time": time.time(), "volts": volts})
+                print(time.strftime("[%H:%M:%S] ") + f"Thresholded PIR threshold set to {volts:.2f} V", flush=True)
+        return volts
+
     # C Key: take a new thermal background (setup only - nobody may be in view)
     def request_recalibration(self):
         self.recalibrateEvent.set()
@@ -773,7 +830,7 @@ class RealTimeSystem:
             return
         self.logWriter.writerow([f"{timestamp:.3f}", result["pir_state"], result["fusion_state"],
                                  f"{result['fusion_confidence']:.4f}", f"{result['pir_relative_voltage']:.4f}",
-                                 f"{processingMs:.2f}"])
+                                 f"{processingMs:.2f}", f"{result['pir_threshold']:.2f}"])
         self.logFile.flush()
 
     def closeLog(self):
@@ -932,8 +989,7 @@ class RealTimeSystem:
         self.lastFusionState = state
         self.lastPirState = result["pir_state"]
         self.publish(warmup="READY", **result, processing_ms=elapsed_ms, processing_max_ms=self.processingMaxMs,
-                     status=f"PIR {sampleRateHz} Hz target · Thermal {REFRESH_RATE_HZ:g} Hz target · "
-                            f"Logging to {self.logPath.name}")
+                     status=f"PIR = 32 Hz | Thermal = 2 Hz")
 
     def _run_thermal(self):
         # Calibrate the PIR baseline and thermal background with an empty detection zone.
@@ -1063,8 +1119,11 @@ class RealTimeSystem:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-dir", type=Path, default=Path("Processed/realtime"))
+    parser.add_argument("--pir-threshold", type=float, default=PIR_THRESHOLD,
+                        help="Starting thresholded-PIR comparison level in volts (change live with Up / Down)")
     args = parser.parse_args()
     system = RealTimeSystem(args.model_dir)
+    system.set_pir_threshold(args.pir_threshold)
     root = tk.Tk()
     LiveGUI(root, system)
     system.start()

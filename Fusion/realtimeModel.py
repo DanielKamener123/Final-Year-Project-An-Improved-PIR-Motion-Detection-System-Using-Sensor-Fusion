@@ -92,6 +92,9 @@ class RealtimeModel:
                 self.backup = backup
                 self.backup_state = StateMachine(backup.thresholds)
         self.mode = MODE_FUSED
+        # Thresholded PIR comparison level in volts (display/comparison only, never a model feature).
+        # main.py can change it live so the examiners can compare against other thresholds.
+        self.pir_threshold = float(PIR_THRESHOLD)
 
     @property
     def has_backup(self):
@@ -130,7 +133,7 @@ class RealtimeModel:
         voltage = float(pirVoltage) if pirVoltage is not None else float("nan")
         if not np.isfinite(voltage):
             raise ValueError("Invalid PIR relative voltage")
-        pir_active = abs(voltage) >= float(PIR_THRESHOLD)
+        pir_active = abs(voltage) >= self.pir_threshold
         if mode == MODE_PIR_BACKUP and self.backup is None:
             raise ValueError("No PIR backup model loaded")
         self._switch_mode(mode)
@@ -148,7 +151,7 @@ class RealtimeModel:
             "pir_state": "INTRUDER" if pir_active else "NO INTRUDER",
             "fusion_state": fusion_state,
             "pir_relative_voltage": voltage,
-            "pir_threshold": float(PIR_THRESHOLD),
+            "pir_threshold": self.pir_threshold,
             "fusion_confidence": fusion_score,
             "mode": mode,
         }
