@@ -10,8 +10,6 @@ from PIR.interface import PIRAcquisition, i2cBusNumber, i2cAddress, sampleRateHz
 from PIR.processing import (
     PIRProcessor,
     threshold,
-    rollingWindow,
-    getHistoryFeatureNames,
 )
 
 RAIL_LOW_V = 0.05
@@ -28,8 +26,6 @@ def main():
     acquisition.start()
     processor.start()
 
-    feature_names = getHistoryFeatureNames()
-
     # --- rolling buffers for plotting ---
     maxlen = int(DISPLAY_WINDOW_S * sampleRateHz * 1.5) + 10
     t_buf = deque(maxlen=maxlen)
@@ -41,7 +37,8 @@ def main():
     clip_warned = False
     t_start = time.monotonic()
 
-    fig, (ax_wave, ax_relative, ax_features) = plt.subplots(3, 1, figsize=(10, 9))
+    # Live PIR values only: raw signal and zero-centred signal
+    fig, (ax_wave, ax_relative) = plt.subplots(2, 1, figsize=(10, 7))
 
     wave_line, = ax_wave.plot([], [], lw=1, label="PIR signal")
     base_line, = ax_wave.plot([], [], lw=1, linestyle="--", label="baseline")
@@ -63,12 +60,6 @@ def main():
     ax_relative.set_xlabel("time (s)")
     ax_relative.set_ylabel("volts from baseline")
     ax_relative.set_title("PIR zero-centred signal")
-
-    feature_bars = ax_features.bar(range(len(feature_names)), [0.0] * len(feature_names))
-    ax_features.set_xticks(range(len(feature_names)), feature_names, rotation=15, ha="right")
-    ax_features.set_ylim(0, 1)
-    ax_features.set_ylabel("feature value")
-    ax_features.set_title(f"Live PIR temporal features ({rollingWindow:.2f} s rolling window)")
 
     status_text = ax_wave.text(
         0.01, 0.95, "", transform=ax_wave.transAxes, va="top", fontsize=8,
@@ -111,12 +102,6 @@ def main():
             if (v_arr[-50:] < RAIL_LOW_V).any() or (v_arr[-50:] > RAIL_HIGH_V).any():
                 clip_warned = True
 
-        feature_values = np.asarray(processor.snapshot(rollingWindow), dtype=np.float64)
-        top = max(float(feature_values.max()), 1e-6)
-        ax_features.set_ylim(0, top * 1.2)
-        for bar, value in zip(feature_bars, feature_values):
-            bar.set_height(value)
-
         if len(recent_sample_times) >= 2:
             dt = recent_sample_times[-1] - recent_sample_times[0]
             achieved_hz = (len(recent_sample_times) - 1) / dt if dt > 0 else 0.0
@@ -134,7 +119,7 @@ def main():
             f"uptime         : {time.monotonic() - t_start:6.1f} s"
         )
 
-        return wave_line, relative_line, base_line, hi_line, lo_line, status_text, *feature_bars
+        return wave_line, relative_line, base_line, hi_line, lo_line, status_text
 
     # Keep A Reference - Otherwise The Animation Is Garbage Collected And The Plot Never Updates
     ani = animation.FuncAnimation(fig, update, interval=200, blit=False, cache_frame_data=False)

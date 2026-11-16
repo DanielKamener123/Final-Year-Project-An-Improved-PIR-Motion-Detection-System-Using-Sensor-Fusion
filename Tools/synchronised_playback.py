@@ -1,33 +1,3 @@
-"""Modern synchronised playback viewer for video + PIR + thermopile data.
-
-Usage:
-    python -m Tools.synchronised_playback --recording "Datasets/training/.../recording_YYYYMMDD_HHMMSS"
-
-Controls:
-    Mouse:
-      - Click Play/Pause
-      - Click -5s / -1s / +1s / +5s
-      - Drag the Timeline slider
-      - Click HUMAN START when a person appears
-      - Click HUMAN END when the person is no longer present
-      - Click Undo Human to remove the most recent human interval
-      - Click Save labels to write labels.csv
-
-    Keyboard:
-      Space           Play / pause
-      Left / A        -1 second
-      Right / D       +1 second
-      J               -5 seconds
-      L               +5 seconds
-      H               Start / end a human interval
-      U               Undo the most recent human interval
-      S               Save labels.csv
-      V / C           Next / previous thermopile processing stage
-      1 - 8           Jump to a thermopile processing stage
-      Home / R        Restart
-      Q / Esc         Quit
-"""
-
 from __future__ import annotations
 
 import argparse

@@ -1,4 +1,3 @@
-"""Real-time model: first-principles Gradient Boosting + three-state alarm machine."""
 import time
 from pathlib import Path
 import numpy as np
@@ -6,52 +5,65 @@ from PIR.processing import threshold as PIR_THRESHOLD, getHistoryFeatureNames, g
 from Thermopile.processing import getThermalFeatureNames
 from Fusion.gradientBoosting import GradientBoosting
 
+# Names and numeric values of the three alarm states
 STATES = ("NO INTRUDER", "MAYBE INTRUDER", "INTRUDER")
 NO_INTRUDER, MAYBE_INTRUDER, INTRUDER = 0, 1, 2
 
-# PIR Strong-Signal Rule (11 Nov): a PIR peak-to-peak this large in the fusion window is always a
-# person moving, so the confidence is set to 1 (INTRUDER). The largest value in the empty exam-venue
-# recordings is 1.33 V (99.9th percentile 0.76 V); fast passes have a median of 2.24 V.
-# 2.0 V keeps a 50% margin above anything seen in an empty scene.
+# Force maximum confidence for strong PIR movement
+# The 2 V limit is above the measured empty venue signals
 USE_PIR_STRONG_RULE = True
 PIR_STRONG_V = 2.0
 
-
-# Applies The PIR Strong-Signal Rule To Confidences (single value or array)
+# Override the confidence when the PIR signal is strong enough
+# Works with one score or an array of scores
 def applyPirStrongRule(scores, pirPeakToPeak):
     if not USE_PIR_STRONG_RULE:
         return scores
+
     return np.where(np.asarray(pirPeakToPeak, dtype=np.float64) > PIR_STRONG_V, 1.0, scores)
 
+# Convert classifier confidence into the three alarm states
 class StateMachine:
     def __init__(self, thresholds):
+        # Separate entry and exit limits prevent rapid state switching
         self.maybe_enter = float(thresholds["maybe_enter"])
         self.maybe_exit = float(thresholds["maybe_exit"])
         self.intruder_enter = float(thresholds["intruder_enter"])
         self.intruder_exit = float(thresholds["intruder_exit"])
-        # Off-delay: INTRUDER only drops after the score has stayed below
-        # intruder_exit for hold_s seconds (0 = original behaviour).
+
+        # Time the score must stay low before leaving INTRUDER
         self.hold_s = float(thresholds.get("hold_s", 0.0))
+
+        # Check that thresholds and hold time are valid
         if not 0 <= self.maybe_exit < self.maybe_enter < self.intruder_exit < self.intruder_enter <= 1:
             raise ValueError("Invalid three-state hysteresis thresholds")
         if self.hold_s < 0:
             raise ValueError("hold_s must be >= 0")
+
+        # Start with no alarm and no active hold timer
         self.state = NO_INTRUDER
         self.below_since = None
 
-    # The only state machine: used live and by the offline evaluation
+    # Update the alarm using the latest confidence score
+    # Same logic for live operation and offline evaluation
     def update(self, score, timestamp=None):
         now = time.monotonic() if timestamp is None else float(timestamp)
+
+        # From NO INTRUDER, enter MAYBE or INTRUDER if confidence rises
         if self.state == NO_INTRUDER:
             if score >= self.intruder_enter:
                 self.state = INTRUDER
             elif score >= self.maybe_enter:
                 self.state = MAYBE_INTRUDER
+
+        # From MAYBE, increase or clear the warning
         elif self.state == MAYBE_INTRUDER:
             if score >= self.intruder_enter:
                 self.state = INTRUDER
             elif score < self.maybe_exit:
                 self.state = NO_INTRUDER
+
+        # From INTRUDER, wait for confidence to remain low
         else:
             if score >= self.intruder_exit:
                 self.below_since = None
@@ -61,24 +73,28 @@ class StateMachine:
                 if now - self.below_since >= self.hold_s:
                     self.state = MAYBE_INTRUDER if score >= self.maybe_exit else NO_INTRUDER
                     self.below_since = None
+
         return STATES[self.state]
 
-# Modes Of The Real-Time Decision (the fused system is always preferred)
+# Fused model is preferred, PIR model is the backup
 MODE_FUSED = "fused"
 MODE_PIR_BACKUP = "pir_backup"
 
+# Load models and make live predictions
 class RealtimeModel:
     def __init__(self, fusion_path, backup_path=None):
-        # PIR-only is a fixed signal threshold, NOT a trained model.
+        # Load the trained fused model and its alarm thresholds
         self.fusion = GradientBoosting.load(fusion_path)
         self.fusion_state = StateMachine(self.fusion.thresholds)
         self.window = self.fusion.window
 
-        # Backup: Gradient Boosting trained on the PIR features only. It is used
-        # ONLY while no thermal frames are received; it is not the thresholded PIR.
+        # Prepare the optional model trained on PIR features only
+        # This is different from the basic thresholded PIR comparison
         self.backup = None
         self.backup_state = None
         self.backup_problem = None
+
+        # Check that the backup model exists and matches the fused model
         if backup_path is None or not Path(backup_path).is_file():
             self.backup_problem = f"No PIR backup model at {backup_path}; run offlineRun.py --train"
         else:
@@ -91,62 +107,84 @@ class RealtimeModel:
             else:
                 self.backup = backup
                 self.backup_state = StateMachine(backup.thresholds)
+
+        # Begin in fused mode
         self.mode = MODE_FUSED
-        # Thresholded PIR comparison level in volts (display/comparison only, never a model feature).
-        # main.py can change it live so the examiners can compare against other thresholds.
+
+        # Separate PIR voltage threshold used for comparison on the display
         self.pir_threshold = float(PIR_THRESHOLD)
 
+    # Whether a valid PIR backup model was loaded
     @property
     def has_backup(self):
         return self.backup is not None
 
-    # Fuses One Thermal Frame With The PIR Window Ending At The Same Time
-    # pirSamples: [(timestamp, relative voltage), ...] covering the window.
-    # thermalFeatures=None means no thermal frame is being received: the PIR-only
-    # backup classifier is used instead (if one was trained).
-    # Returns (result, None), or (None, reason) when the PIR window is not usable.
+    # Combine the latest thermal features with a matching PIR history window
     def fuse(self, thermalFeatures, pirSamples, timestamp):
+        # Reject PIR windows with too little history
         if len(pirSamples) < 2 or pirSamples[0][0] > timestamp - self.window + 0.15:
             return None, "Insufficient PIR history; waiting for samples"
+
+        # Reject outdated PIR data
         if timestamp - pirSamples[-1][0] > 0.3:
             return None, "Stale PIR samples"
+
+        # Require a backup model if thermal frames are missing
         if thermalFeatures is None and self.backup is None:
             return None, f"No thermal frames and no PIR backup model ({self.backup_problem})"
+
+        # Extract the PIR history features
         row = dict(zip(getHistoryFeatureNames(), (float(v) for v in getHistoryFeatureVector(pirSamples))))
+
+        # Add thermal features when a frame is available
         if thermalFeatures is not None:
             row.update({name: float(thermalFeatures[name]) for name in getThermalFeatureNames()})
+
+        # Select fused or backup prediction based on thermal availability
         mode = MODE_FUSED if thermalFeatures is not None else MODE_PIR_BACKUP
         return self.predict(row, timestamp, pirVoltage=pirSamples[-1][1], mode=mode), None
 
-    # Carries The Alarm State Across A Mode Switch So A Switch Never Drops An Alarm
+    # Preserve the current alarm when switching between the two models
     def _switch_mode(self, mode):
         if mode == self.mode:
             return
+
+        # Copy the previous alarm state into the newly selected model
         previous = self.fusion_state if self.mode == MODE_FUSED else self.backup_state
         current = self.fusion_state if mode == MODE_FUSED else self.backup_state
         current.state = previous.state
         current.below_since = None
         self.mode = mode
 
+    # Produce the PIR baseline and trained model outputs
     def predict(self, row, timestamp=None, pirVoltage=None, mode=MODE_FUSED):
-        # PIR-only baseline uses the newest relative PIR sample (not a model feature)
+        # Compare the latest PIR voltage against the simple PIR threshold
         voltage = float(pirVoltage) if pirVoltage is not None else float("nan")
         if not np.isfinite(voltage):
             raise ValueError("Invalid PIR relative voltage")
         pir_active = abs(voltage) >= self.pir_threshold
+
+        # Check backup availability before changing modes
         if mode == MODE_PIR_BACKUP and self.backup is None:
             raise ValueError("No PIR backup model loaded")
         self._switch_mode(mode)
+
+        # Calculate human confidence with the selected Gradient Boosting model
         if mode == MODE_FUSED:
             fusion_score = self.fusion.confidence(row)
         else:
             fusion_score = self.backup.confidence(row)
-        # PIR strong-signal rule (same rule as the demo training)
+
+        # Override confidence for a strong PIR signal
         fusion_score = float(applyPirStrongRule(fusion_score, row["pirPeakToPeak"]))
+
+        # Update the correct alarm state machine
         if mode == MODE_FUSED:
             fusion_state = self.fusion_state.update(fusion_score, timestamp)
         else:
             fusion_state = self.backup_state.update(fusion_score, timestamp)
+
+        # Return both outputs and values needed by the live display
         return {
             "pir_state": "INTRUDER" if pir_active else "NO INTRUDER",
             "fusion_state": fusion_state,

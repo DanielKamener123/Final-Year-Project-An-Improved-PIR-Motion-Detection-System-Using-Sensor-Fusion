@@ -1,21 +1,3 @@
-"""Demo fallback: replays a recorded session through the real-time system as if it were live.
-
-Run from the project root:
-    python -m Tools.demo_replay --recording "Datasets/validation/HomeDadValid"
-
-Use this if the hardware fails during the demo. Every frame is processed while it
-plays, exactly as main.py does on the ROCK: the same ThermopilePipeline,
-PIRProcessor, first-principles Gradient Boosting and three-state machine
-(Fusion/realtimeModel.py). Nothing is pre-computed. The recording supplies the
-sensor samples and the background calibration saved during collection.
-
-Keys:
-    SPACE       Pause / resume
-    R           Restart (from --start)
-    V / C       Next / previous thermopile processing stage
-    1 - 8       Jump to a thermopile processing stage
-    Q / Esc     Quit
-"""
 from __future__ import annotations
 
 import argparse

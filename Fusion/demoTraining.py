@@ -1,40 +1,3 @@
-"""Demo training: one model for the exam venue (and backup site), fewest false alarms first.
-
-  python offlineRun.py --demo --name Demo_Wed
-
-1. Loads every recording under DEMO_DATASETS (no validation/testing split).
-2. Training rows that are NOT used:
-   - rows within BOUNDARY_S of a label start/end (live SPACE labels lag the real entry/exit)
-   - "clean negatives": non-walk rows within CLEAN_NEGATIVE_S before/after a labelled walk
-     in walk recordings (the walker is just outside the zone or walking back: a person is
-     there but labelled "nobody", which taught the model that person-like signals are
-     ambiguous and caused false alarms in empty scenes). Empty recordings and empty.csv
-     stretches are always kept.
-   - rows inside a labels(outbound).csv walk (a person walking away, labelled "nobody")
-3. Venue and empty rows are repeated FOCUS_WEIGHT times so the exam venue and the
-   "nobody there" data are not drowned out by the older sites.
-4. Leave-one-recording-out on the VENUE recordings only: each venue recording is scored by a
-   scikit-learn Gradient Boosting (same settings) trained on everything else.
-5. Alarm settings (three-state thresholds + hold) are chosen on those held-out venue scores:
-   only settings that detect at least MIN_DETECTION % of the venue walks, and still at least
-   ROBUST_DETECTION % with every score ROBUST_SHIFT lower; then, among those within
-   ALARM_TOLERANCE points of the fewest false alarms (alarmed time in empty venue time), the one
-   that detects the most walks. Only settings with at most MAX_SEGMENTS INTRUDER segments per walk
-   are considered (falls back to all settings if none qualifies).
-6. The first-principles Gradient Boosting is trained on all training rows and exported with
-   the chosen settings. Steps 4-6 are repeated with only the PIR features for the backup.
-7. demo_report.txt (venue only), demo_tradeoff_*.csv (every setting) and demo_scores_*.csv
-   (held-out scores) are written so another operating point can be chosen without retraining.
-
-11 Nov: the final choice in step 5 is now the highest FRAME detection rate of moving people (frame Pd),
-then the most walks. Still rows (no motion on either sensor) are left out of training and frame Pd,
-short passes keep their rows, and the PIR strong-signal rule is applied to the held-out scores.
-
-Venue recordings: recordings outside Datasets/old whose name starts with one of VENUE_PREFIXES
-(exam venue "Uni...", backup site "Backup..."). Recordings whose name contains Empty,
-Distractor or Negative (or that have no labelled walks) are empty recordings. A recording may
-also contain empty.csv (start_s,end_s): stretches known to have nobody in view.
-"""
 from pathlib import Path
 import glob
 
@@ -47,46 +10,55 @@ from Fusion.models import buildModels, confidenceScores
 from Fusion.realtimeModel import StateMachine, INTRUDER, MAYBE_INTRUDER, NO_INTRUDER, applyPirStrongRule, PIR_STRONG_V
 from PIR.processing import getHistoryFeatureNames
 
-# Config
+
+# Training sources, including older recordings
 DEMO_DATASETS = [
     "Datasets/demo",
     "Datasets/training",
     "Datasets/validation",
     "Datasets/testing",
-    "Datasets/old",          # every older recording (training, validation and testing)
+    "Datasets/old",          
 ]
+# PIR feature history per thermal decision
 DEMO_WINDOW_S = 2.0
-VENUE_PREFIXES = ("Uni", "Backup")   # exam venue and backup site (outside Datasets/old)
+# Venue recordings used for held-out evaluation
+VENUE_PREFIXES = ("Uni", "Backup")   
+# Names treated as empty-scene recordings
 EMPTY_KEYWORDS = ("empty", "distractor", "negative")
-BOUNDARY_S = 1.0             # label grace: key-press lag around each entry/exit
-CLEAN_NEGATIVE_S = 5.0       # non-walk rows this close to a walk are not used for training
-FOCUS_WEIGHT = 3             # venue and empty rows count this many times in training
-MIN_DETECTION = 95.0         # % of venue walks that must be detected; then fewest false alarms
-# Robust choice (10 Nov): a setting must still detect ROBUST_DETECTION % when every score is ROBUST_SHIFT
-# lower (a new day scores a bit differently), and among settings within ALARM_TOLERANCE points of the
-# fewest false alarms the one detecting the most walks is taken (the empty venue time is short, so
-# smaller differences in false alarms are noise). Demo_v3 without this picked INTRUDER 0.9, which
-# detected 183/191 walks but 0/191 with scores 0.1 lower.
+# Ignore uncertain labels around walk boundaries
+BOUNDARY_S = 1.0             
+# Ignore nearby negative rows that may still contain a person
+CLEAN_NEGATIVE_S = 5.0       
+# Repeat venue and empty rows to give them more influence
+FOCUS_WEIGHT = 3             
+# Minimum fraction of walks that must trigger an alarm
+MIN_DETECTION = 95.0         
+
+
+# Test thresholds with slightly reduced confidence scores
 ROBUST_SHIFT = 0.05
+# Minimum walk detection after reducing scores
 ROBUST_DETECTION = 90.0
+# Allow small false alarm differences before choosing by detection
 ALARM_TOLERANCE = 1.0
-# Fragmentation (10 Nov): only settings with at most MAX_SEGMENTS INTRUDER segments per venue walk are
-# considered (on Demo_v3 this gives hold 2 s: 2.22 -> 1.63 segments, same false-alarm events, each 2 s longer)
+
+
+# Limit repeated INTRUDER alarms during one walk
 MAX_SEGMENTS = 1.7
-MAX_DELAY_S = 10.0           # a walk counts as detected if INTRUDER within 10 s of entry
-# Motion-only demo changes (11 Nov)
-# Short (fast) passes: every row of a pass shorter than 2 s was within BOUNDARY_S of its start or end,
-# so runners were never trained on. For passes shorter than SHORT_WALK_S only the rows just OUTSIDE
-# the pass are dropped; the rows inside are kept.
+# Maximum time after entry to count a walk as detected
+MAX_DELAY_S = 10.0           
+
+
+# Keep frames inside short, fast passes
 SHORT_WALK_S = 3.0
-# Still frames: human-labelled rows where neither sensor shows any motion (PIR peak-to-peak and the
-# thermal frame difference below the venue's empty-scene 99th percentile, no moving thermal blob).
-# The system only has to detect motion, so these rows (mostly people standing) are left out of
-# training and out of the frame-based detection rate.
+
+
+# Empty-scene percentile used to identify motionless frames
 STILL_PERCENTILE = 99.0
 
 
-# Every Recording Folder Under The Demo Datasets (folders with metadata.json)
+# Find all recordings with a metadata file
+# Use a set to avoid duplicates; sort for repeatable order
 def demoRecordings(datasets=DEMO_DATASETS):
     folders = set()
     for pattern in datasets:
@@ -95,27 +67,36 @@ def demoRecordings(datasets=DEMO_DATASETS):
     return sorted(folders)
 
 
+# Flag empty recordings by name or absence of human labels
 def isEmptyRecording(path, labels):
     name = Path(path).name.lower()
     return any(word in name for word in EMPTY_KEYWORDS) or not (labels["human"] == 1).any()
 
 
+# Include Uni/Backup sessions, excluding old recordings
 def isVenueRecording(path):
     path = Path(path)
     return path.name.startswith(VENUE_PREFIXES) and "old" not in path.parts
 
 
-# Builds One Fused Row Per Thermal Frame For Every Recording, With Training/Scoring Flags
+# Build one feature table across all recording folders
+# Add flags that control training and venue evaluation
 def buildDemoData(window, progress=print):
     parts = []
     for path in demoRecordings():
+
+        # Require human labels for each recording
         labelsPath = path / "labels.csv"
         if not labelsPath.exists():
             progress(f"  skipping {path}: no labels.csv")
             continue
+
+        # Extract aligned PIR and thermal features
         data = buildRecordingDataset(path, window)
         if data.empty:
             continue
+
+        # Read walk intervals and identify the recording type
         labels = pd.read_csv(labelsPath)
         walks = labels[labels["human"] == 1][["start_s", "end_s"]].to_numpy(dtype=float)
         times = data["fusionTime"].to_numpy()
@@ -124,20 +105,28 @@ def buildDemoData(window, progress=print):
         data["venue"] = isVenueRecording(path)
         data["session"] = path.name
 
+        # Track rows too close to walk start or end labels
         near = np.zeros(len(data), dtype=bool)
         closeToWalk = np.zeros(len(data), dtype=bool)
         for start, end in walks:
+
+            # For short walks, exclude nearby outside frames only
+            # Keep the actual walk frames for learning fast motion
             if end - start < SHORT_WALK_S:
-                # Short pass: keep the rows inside, drop only the rows just outside
+
                 near |= ((times >= start - BOUNDARY_S) & (times < start)) | \
                         ((times > end) & (times <= end + BOUNDARY_S))
                 continue
+
+            # Longer walks: exclude frames at uncertain entry/exit times
             near |= (np.abs(times - start) <= BOUNDARY_S) | (np.abs(times - end) <= BOUNDARY_S)
             closeToWalk |= ((times >= start - CLEAN_NEGATIVE_S) & (times < start)) | \
                            ((times > end) & (times <= end + CLEAN_NEGATIVE_S))
         data["nearBoundary"] = near
 
-        # Person walking away from the sensor (optional labels(outbound).csv): not "nobody"
+
+        # Exclude outbound walks labelled as empty
+        # A person can still be visible while walking away
         outbound = np.zeros(len(data), dtype=bool)
         outboundPath = path / "labels(outbound).csv"
         if outboundPath.exists():
@@ -148,7 +137,8 @@ def buildDemoData(window, progress=print):
                 outbound |= (times >= start - BOUNDARY_S) & (times <= end + BOUNDARY_S)
         data["outbound"] = outbound
 
-        # Known-empty stretches inside a walk recording (optional empty.csv)
+
+        # Read optional intervals confirmed to be empty
         known = np.zeros(len(data), dtype=bool)
         emptyPath = path / "empty.csv"
         if emptyPath.exists():
@@ -157,9 +147,13 @@ def buildDemoData(window, progress=print):
         data["knownEmpty"] = known
         data["emptyTime"] = empty | known
 
-        # Rows used for training: no label-boundary rows, no "person just outside the zone" rows
+
+        # Keep reliable training rows only
+        # Drop uncertain boundaries, nearby negatives and outbound negatives
         data["train"] = ~near & ~(closeToWalk & (data["human"].to_numpy() == 0) & ~data["emptyTime"].to_numpy()) \
                         & ~(outbound & (data["human"].to_numpy() == 0))
+
+        # Collect recording data and show its row count
         parts.append(data)
         progress(f"  {path}: {len(data)} rows{' (venue)' if data['venue'].iloc[0] else ''}"
                  f"{' (empty)' if empty else ''}{' (+empty.csv)' if known.any() else ''}"
@@ -167,18 +161,30 @@ def buildDemoData(window, progress=print):
     return pd.concat(parts, ignore_index=True)
 
 
-# Marks Human Rows Where Neither Sensor Shows Motion (left out of training and frame Pd)
+# Find labelled human frames without detectable movement
+# Remove these from training and moving-frame detection scoring
 def markStillRows(data, progress=print):
+
+    # Use venue empty frames to estimate normal sensor noise
+    # Fall back to other empty recordings if needed
     venueEmpty = (data["venue"] & data["emptyTime"]).to_numpy()
     reference = venueEmpty if venueEmpty.any() else data["emptyTime"].to_numpy()
     if not reference.any():
         progress("  WARNING: no empty time to set the still-row limits; no rows marked still")
+
+        # Save still flags and exclude them from training
         data["still"] = False
         return data
+
+    # Set PIR and thermal motion limits from empty-scene percentiles
     pirLimit = float(np.percentile(data.loc[reference, "pirPeakToPeak"], STILL_PERCENTILE))
     fdLimit = float(np.percentile(data.loc[reference, "thermalFdWindowMaxEnergy"], STILL_PERCENTILE))
+
+    # Still = human present, weak PIR, no blob, little thermal change
     still = (data["human"].to_numpy() == 1) & (data["pirPeakToPeak"].to_numpy() < pirLimit) & \
             (data["thermalNumberOfBlobs"].to_numpy() == 0) & (data["thermalFdWindowMaxEnergy"].to_numpy() < fdLimit)
+
+    # Save still flags and exclude them from training
     data["still"] = still
     data["train"] = data["train"].to_numpy() & ~still
     human = int((data["human"] == 1).sum())
@@ -187,10 +193,13 @@ def markStillRows(data, progress=print):
     return data
 
 
-# Training Matrix With Venue And Empty Rows Repeated FOCUS_WEIGHT Times
+# Build feature matrix X and human labels y
+# Weight venue and empty examples by repeating their rows
 def trainingRows(data, rows, features):
     X = data.loc[rows, features]
     y = data.loc[rows, "human"]
+
+    # Select rows needing additional training weight
     focus = (data.loc[rows, "venue"] | data.loc[rows, "emptyTime"]).to_numpy()
     if FOCUS_WEIGHT > 1 and focus.any():
         X = pd.concat([X] + [X[focus]] * (FOCUS_WEIGHT - 1))
@@ -198,38 +207,52 @@ def trainingRows(data, rows, features):
     return X, y
 
 
-# Held-Out Human Probabilities For Every Venue Recording (scikit-learn, same settings)
+# Leave-one-venue-recording-out evaluation
+# Each venue recording is scored by a model trained without it
 def heldOutScores(data, features, progress=print):
+
+    # Start with missing scores for non-venue rows
     scores = np.full(len(data), np.nan)
     sessions = data.loc[data["venue"], "session"].unique()
+
+    # Hold out one session and train on the remaining eligible rows
     for k, session in enumerate(sessions, 1):
         test = (data["session"] == session).to_numpy()
         X, y = trainingRows(data, ~test & data["train"].to_numpy(), features)
+
+        # Use the scikit-learn model for threshold evaluation
         model = buildModels()["Gradient Boosting"].fit(X, y)
         scores[test] = confidenceScores(model, data.loc[test, features])
         progress(f"  held-out {k}/{len(sessions)}: {session}")
     return scores
 
 
-# Three-State Settings Searched (same structure as the hysteresis state machine)
+# Generate candidate three-state thresholds and hold times
 def candidateSettings():
     for intruderEnter in np.arange(0.30, 0.951, 0.05):
         for gap in (0.05, 0.10, 0.15):
             for hold in (0.0, 1.0, 2.0, 3.0):
+
+                # Set enter/exit gaps to reduce rapid state switching
                 enter = round(float(intruderEnter), 3)
                 exitLevel = round(enter - gap, 3)
                 maybeEnter = round(exitLevel - 0.10, 3)
                 maybeExit = round(maybeEnter - 0.10, 3)
+
+                # Skip thresholds below zero probability
                 if maybeExit < 0:
                     continue
                 yield {"maybe_enter": maybeEnter, "maybe_exit": maybeExit, "intruder_enter": enter,
                        "intruder_exit": exitLevel, "hold_s": hold}
 
 
-# Runs The Live State Machine Over Every Recording In Time Order
+# Replay probability scores through the live state machine
+# Reset alarm state at the start of each recording
 def runStates(data, scores, settings):
     states = np.zeros(len(data), dtype=int)
     times = data["fusionTime"].to_numpy()
+
+    # Process each recording independently in timestamp order
     for _, idx in data.groupby("recording", sort=False).indices.items():
         idx = idx[np.argsort(times[idx])]
         machine = StateMachine(settings)
@@ -239,7 +262,7 @@ def runStates(data, scores, settings):
     return states
 
 
-# Walk Detection, Fragmentation And Empty-Time Alarms Per Recording
+# Measure walk detections, alarm fragmentation and empty-scene alarms
 def recordingResults(data, states):
     rows = []
     times = data["fusionTime"].to_numpy()
@@ -254,24 +277,37 @@ def recordingResults(data, states):
         delays = []
         segments = []
         intruder = st == INTRUDER
+
+        # Evaluate each labelled walk only for nonempty recordings
         if not empty:
             for start, end in labels[labels["human"] == 1][["start_s", "end_s"]].itertuples(index=False):
-                if start < t[0] + 1.0 or start > t[-1]:   # walk starts before the system was ready
+
+                # Ignore walks beginning before processing was ready
+                if start < t[0] + 1.0 or start > t[-1]:   
                     continue
                 walks += 1
+
+                # Count an INTRUDER alarm within the allowed response window
                 window = (t >= start) & (t <= min(start + MAX_DELAY_S, end + BOUNDARY_S))
                 hits = np.flatnonzero(window & intruder)
                 if len(hits):
                     detected += 1
                     delays.append(t[hits[0]] - start)
+
+                # Count separate INTRUDER segments within each walk
                 inside = intruder[(t >= start) & (t <= end)]
                 segments.append(int(inside.any()) + int(np.sum(inside[1:] & ~inside[:-1])) if inside.size else 0)
+
+        # Estimate time per row, capped to avoid inflating gaps
         step = np.clip(np.diff(t, prepend=t[0]), 0.0, 1.0)
         emptyRows = emptyTime[idx]
-        # Frame-based detection: human rows that are not still and not at a label boundary
+
+        # Score frame detection only for moving humans away from boundaries
         moving = (data["human"].to_numpy()[idx] == 1) & ~data["nearBoundary"].to_numpy()[idx]
         if "still" in data:
             moving &= ~data["still"].to_numpy()[idx]
+
+        # Store event, frame and empty-time metrics for this recording
         rows.append({
             "recording": Path(recording).name, "empty": empty, "walks": walks, "detected": detected,
             "delays": delays, "segments": segments, "empty_s": step[emptyRows].sum(),
@@ -282,13 +318,18 @@ def recordingResults(data, states):
     return pd.DataFrame(rows)
 
 
+# Combine per-recording metrics into one summary
 def summarise(results):
     walks = int(results["walks"].sum())
     detected = int(results["detected"].sum())
     emptySeconds = float(results["empty_s"].sum())
+
+    # Flatten detection delays and alarm-segment counts
     delays = [d for row in results["delays"] for d in row]
     segments = [s for row in results["segments"] for s in row]
     movingFrames = int(results["moving_frames"].sum())
+
+    # Calculate walk Pd, moving-frame Pd and empty alarm percentages
     return {
         "frame_pd": 100.0 * results["moving_intruder"].sum() / movingFrames if movingFrames else float("nan"),
         "walks": walks, "detected": detected, "pd": 100.0 * detected / walks if walks else float("nan"),
@@ -300,41 +341,61 @@ def summarise(results):
     }
 
 
-# Every Setting Scored On The Venue; Robust To Lower Scores, Then Fewest False Alarms, Then Most Walks
+# Evaluate every threshold candidate on held-out venue predictions
+# Prefer reliable detection with low empty-scene alarm time
 def chooseSettings(venueData, scores, progress=print):
     table = []
+
+    # Simulate weaker predictions on a different day
     lowerScores = np.clip(np.asarray(scores) - ROBUST_SHIFT, 0.0, 1.0)
+
+    # Run original and reduced scores through each alarm setting
     for settings in candidateSettings():
         summary = summarise(recordingResults(venueData, runStates(venueData, scores, settings)))
         lower = summarise(recordingResults(venueData, runStates(venueData, lowerScores, settings)))
         table.append({**settings, **summary, "detected_lower": lower["detected"], "pd_lower": lower["pd"]})
     table = pd.DataFrame(table)
+
+    # Check whether false alarm performance can be measured
     noEmpty = table["alarmed"].isna().all()
     if noEmpty:
         progress("  WARNING: no empty venue time (record Empty sessions or add empty.csv); "
                  "choosing on detection only")
+
+    # Keep settings meeting both normal and reduced-score targets
     ok = table[(table["pd"] >= MIN_DETECTION) & (table["pd_lower"] >= ROBUST_DETECTION)]
     if not ok.empty:
+
+        # Prefer settings with fewer repeated alarms per walk
         unfragmented = ok[ok["segments"] <= MAX_SEGMENTS]
         if unfragmented.empty:
             progress(f"  WARNING: no setting has <= {MAX_SEGMENTS:g} INTRUDER segments per walk; ignoring that limit")
         else:
             ok = unfragmented
+
+    # Fallback if no settings meet the preferred constraints
     if ok.empty:
         progress(f"  WARNING: no setting detects {ROBUST_DETECTION:g}% of venue walks with scores {ROBUST_SHIFT:g} "
                  f"lower; ignoring the lower-score check")
         ok = table[table["pd"] >= MIN_DETECTION]
+
+    # Fallback if no settings meet the preferred constraints
     if ok.empty:
-        # Still false alarms first: fewest false alarms within 2 points of the best detection reached
+
         progress(f"  WARNING: no setting reaches {MIN_DETECTION:g}% of venue walks; choosing the fewest "
                  f"false alarms within 2 points of the best detection ({table['pd'].max():.1f}%)")
         ok = table[table["pd"] >= table["pd"].max() - 2.0]
     if not noEmpty:
-        # Differences in false alarms smaller than ALARM_TOLERANCE points are noise: take the most walks
+
+        # Allow settings close to the minimum false alarm time
         ok = ok[ok["alarmed"] <= ok["alarmed"].min() + ALARM_TOLERANCE]
-    # Frame-based (11 Nov): among those, the highest frame detection rate of moving people
+
+    # Choose highest moving-frame Pd, then walk Pd
+    # Break remaining ties by false alarms and fragmentation
     best = ok.sort_values(["frame_pd", "pd", "alarmed", "intruder", "segments"],
                           ascending=[False, False, True, True, True], na_position="last").iloc[0]
+
+    # Save only the thresholds and hold time needed live
     keys = ("maybe_enter", "maybe_exit", "intruder_enter", "intruder_exit", "hold_s")
     settings = {k: float(best[k]) for k in keys}
     progress(f"  chosen: INTRUDER {settings['intruder_enter']}/{settings['intruder_exit']}, "
@@ -344,16 +405,22 @@ def chooseSettings(venueData, scores, progress=print):
     return settings, table
 
 
-# Trade-Off Lines: fewest false alarms reachable at each venue detection level
+# Format a short threshold trade-off comparison
 def tradeOffLines(name, table, chosen):
     lines = [f"{name}: fewest false alarms at each venue detection level (held-out)",
              f"{'walks':>9s} {'detect %':>8s} {'frame Pd %':>10s} {'empty alarmed %':>15s} {'INTRUDER %':>10s} {'segs/walk':>9s} "
              f"{'delay s':>7s} {f'walks if scores {ROBUST_SHIFT:g} lower':>26s}  setting"]
+
+    # Locate the selected setting in the results table
     isChosen = np.all([np.abs(table[k] - v) < 1e-9 for k, v in chosen.items()], axis=0)
+
+    # Show representative low-alarm settings for each detection level
     best = table.sort_values(["alarmed", "intruder"]).drop_duplicates("detected").sort_values("pd", ascending=False)
     best = best.head(15)
     if not np.all([np.abs(best[k] - v) < 1e-9 for k, v in chosen.items()], axis=0).any():
         best = pd.concat([best, table[isChosen]]).sort_values(["pd", "alarmed"], ascending=[False, True])
+
+    # Mark the chosen setting in the report
     for _, row in best.iterrows():
         mark = "  <- chosen" if all(abs(row[k] - v) < 1e-9 for k, v in chosen.items()) else ""
         lines.append(f"{int(row['detected']):>4d}/{int(row['walks']):<4d} {row['pd']:8.1f} {row['frame_pd']:10.1f} {row['alarmed']:15.1f} "
@@ -364,16 +431,19 @@ def tradeOffLines(name, table, chosen):
     return lines
 
 
+# Baseline: PIR threshold crossing gives an INTRUDER state
 def pirStates(data):
     return np.where(data["pirThresholdIntervalActive"].to_numpy() == 1, INTRUDER, NO_INTRUDER)
 
 
+# Build side-by-side per-recording performance text
 def reportLines(title, systems):
     """systems: {name: per-recording results}. Returns report lines."""
     lines = [title, "-" * len(title)]
     header = f"{'Venue recording':36s}" + "".join(f" | {name:>44s}" for name in systems)
     lines += [header, "-" * len(header)]
 
+    # Compress each recording summary into a short report cell
     def cell(summary):
         parts = []
         if summary["walks"]:
@@ -386,6 +456,7 @@ def reportLines(title, systems):
             parts.append(f"empty {summary['empty_min']:.0f}min alarmed {summary['alarmed']:.1f}%")
         return " ".join(parts) if parts else "-"
 
+    # Write each venue recording followed by the venue total
     first = next(iter(systems.values()))
     for i, recording in enumerate(first["recording"]):
         lines.append(f"{recording[:36]:36s}" + "".join(
@@ -395,12 +466,17 @@ def reportLines(title, systems):
     return lines
 
 
-# Full Demo Run: settings, final first-principles models, report
+# Run the full demo training and evaluation workflow
+# Export a fused model and a PIR-only backup
 def runDemoTraining(runName, folder, window, modelPath, backupPath, progress=print):
+
+    # Create a new output folder and prepare all training rows
     folder.mkdir(parents=True, exist_ok=False)
     progress(f"Building features ({window:g} s window) for every demo recording...")
     data = buildDemoData(window, progress)
     data = markStillRows(data, progress)
+
+    # Keep venue rows for held-out performance reporting
     venue = data["venue"].to_numpy()
     if not venue.any():
         raise ValueError(f"No venue recordings found (names starting with {VENUE_PREFIXES} outside Datasets/old)")
@@ -410,32 +486,46 @@ def runDemoTraining(runName, folder, window, modelPath, backupPath, progress=pri
              f"({int(venueData['emptyTime'].sum())} empty-time rows); "
              f"{int(data['train'].sum())} training rows before weighting")
 
+    # Train fused and PIR-only versions using the same procedure
     outputs = {}
     tradeOffs = {}
     for name, features, path, tag in (("Fused system", getFusedFeatureNames(), modelPath, "fused"),
                                       ("PIR-only backup", getHistoryFeatureNames(), backupPath, "pir_backup")):
         progress(f"\n{name}: held-out scores for each venue recording...")
+
+        # Get held-out venue scores for this feature set
         scores = heldOutScores(data, features, progress)[venue]
-        # PIR strong-signal rule: the same rule the live system applies (Fusion/realtimeModel.py)
+
+        # Apply the same strong-PIR override as the live system
         scores = applyPirStrongRule(scores, venueData["pirPeakToPeak"].to_numpy())
+
+        # Export probabilities for later inspection
         pd.DataFrame({"recording": venueData["session"], "time_s": venueData["fusionTime"],
                       "human": venueData["human"], "emptyTime": venueData["emptyTime"], "score": scores}) \
             .to_csv(folder / f"demo_scores_{tag}.csv", index=False)
         progress(f"{name}: choosing alarm settings (>= {MIN_DETECTION:g}% of venue walks, >= {ROBUST_DETECTION:g}% "
                  f"with scores {ROBUST_SHIFT:g} lower, fewest false alarms, then most walks)...")
+
+        # Tune alarm thresholds using held-out venue performance
         settings, table = chooseSettings(venueData, scores, progress)
         table.to_csv(folder / f"demo_tradeoff_{tag}.csv", index=False)
         progress(f"{name}: training the first-principles Gradient Boosting on all training rows...")
+
+        # Train the final custom Gradient Boosting on all eligible rows
         X, y = trainingRows(data, data["train"].to_numpy(), features)
         model = GradientBoosting().fit(X.to_numpy(dtype=float), y.to_numpy(), features, progress=progress)
+
+        # Export the trained model together with its alarm settings
         model.save(path, window, settings)
         progress(f"Saved {path}")
         outputs[name] = (settings, recordingResults(venueData, runStates(venueData, scores, settings)))
         tradeOffs[name] = tradeOffLines(name, table, settings)
 
+    # Compare fused, PIR backup and simple PIR threshold systems
     systems = {"Thresholded PIR": recordingResults(venueData, pirStates(venueData))}
     systems.update({name: results for name, (_, results) in outputs.items()})
 
+    # Write training assumptions and venue results to a text report
     lines = [f"DEMO TRAINING REPORT: {runName}",
              f"Window {window:g} s. Trained on every recording under: {', '.join(DEMO_DATASETS)}",
              f"Venue recordings: names starting with {', '.join(VENUE_PREFIXES)} (outside Datasets/old).",
@@ -452,10 +542,14 @@ def runDemoTraining(runName, folder, window, modelPath, backupPath, progress=pri
              f"Motion only: human rows with no motion on either sensor are left out of training and frame Pd; "
              f"PIR strong-signal rule: INTRUDER when PIR peak-to-peak > {PIR_STRONG_V:g} V.",
              "frame Pd = INTRUDER frames / moving human frames (not still, not within the label boundary).", ""]
+
+    # Add selected alarm thresholds for each model
     for name, (settings, _) in outputs.items():
         lines.append(f"{name} alarm settings: INTRUDER on {settings['intruder_enter']} / off {settings['intruder_exit']}, "
                      f"MAYBE on {settings['maybe_enter']} / off {settings['maybe_exit']}, hold {settings['hold_s']:g} s")
     lines.append("")
+
+    # Append venue metrics and the threshold trade-off tables
     lines += reportLines("VENUE RESULTS (held-out)", systems)
     for name in tradeOffs:
         lines += [""] + tradeOffs[name]
@@ -466,6 +560,7 @@ def runDemoTraining(runName, folder, window, modelPath, backupPath, progress=pri
     return text
 
 
+# Describe the active thermal foreground threshold mode
 def _thresholdText():
     from Thermopile import processing
     if getattr(processing, "USE_FIXED_THRESHOLD", False):

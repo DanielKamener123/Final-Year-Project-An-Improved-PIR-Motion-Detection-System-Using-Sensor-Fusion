@@ -22,7 +22,7 @@ def selectDataRate(requestedHz):
 # I2C 2 - PINS 27/28
 i2cBusNumber = 2
 i2cAddress = 0x48
-sampleRateHz = 25 # Change to 32 and remove timing stuff
+sampleRateHz = 25
 
 # PIR Acquisition Is On Its Own Thread
 class PIRAcquisition(threading.Thread):

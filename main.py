@@ -1,4 +1,3 @@
-"""Start the complete live sensor-fusion system on the ROCK 4C+."""
 import argparse
 import csv
 import json
@@ -18,77 +17,51 @@ from Thermopile.interface import getFrame, REFRESH_RATE_HZ
 from Thermopile.processing import ThermopilePipeline, FRAME_SHAPE
 from Fusion.realtimeModel import RealtimeModel, MODE_FUSED, MODE_PIR_BACKUP, NO_INTRUDER
 
-# Live calibration matches the recordings (Collection/rock_agent.py): the first
-# N_WARMUP_FRAMES frames after start-up are thrown away, then the background and
-# sigma come from CALIBRATION_SECONDS * THERMAL_RATE_HZ = 10 * 4 = 40 frames.
-# Same number of frames -> same sigma estimate -> same z values as the training data.
 CALIBRATION_DISCARD_FRAMES = 20
 CALIBRATION_FRAMES = 40
 
-# Live log: one row per fused decision (both systems from the same acquisition,
-# plus the processing time used for the response-time test)
 LOG_FOLDER = Path("Processed/live_logs")
 LOG_COLUMNS = ["timestamp", "pir_state", "fusion_state", "fusion_confidence",
                "pir_relative_voltage", "processing_ms", "pir_threshold_v"]
 
-# Sensor Failure Handling
-# No thermal frame for this long -> PIR-only backup classifier (same 1 s gap at
-# which Fusion/dataset.py stops fusing). Back to the fused system once valid
-# thermal frames have arrived again for one fusion window.
+
 THERMAL_TIMEOUT_S = 1.0
-# No thermal frame at all this long after start-up -> no working thermopile
 STARTUP_THERMAL_TIMEOUT_S = 3.0
-# No PIR sample for this long -> PIR reported missing (decisions pause, thermal keeps running)
 PIR_TIMEOUT_S = 1.0
-# Decision rate while no thermal frames arrive (the thermal frame rate)
 DECISION_PERIOD_S = 1.0 / REFRESH_RATE_HZ
-# Most recent start-up background, reused when the thermopile is not working at start-up
 BACKGROUND_FILE = "thermal_background.json"
 
-# Thresholded PIR Comparison Level (Up / Down arrow keys or the - / + buttons change it live).
-# Only the thresholded-PIR comparison uses it; the fused system's PIR features keep PIR/processing.py's threshold.
 PIR_THRESHOLD_STEP_V = 0.05
 PIR_THRESHOLD_MIN_V = 0.05
 PIR_THRESHOLD_MAX_V = 1.60
 
-# Sensor View Settings
 PIR_DISPLAY_S = 15.0
 THERMAL_SCALE = 12
-# Thermopile processing stages shown in the sensor view (keys 1-5):
-# (tab label, title, plain explanation for the examiners, stage key)
 THERMAL_STAGES = [
     ("Raw", "Raw temperature",
-     "What the 32 x 24 thermopile measures, in degrees Celsius. A person shows up as a warmer patch.", "raw"),
+     "", "raw"),
     ("Background", "Background model",
-     "The learned empty scene. It slowly follows the weather but is never updated where a person is detected.",
+     "",
      "background"),
     ("Z score", "Z score",
-     "How unusual each pixel is: (temperature - background) / that pixel's normal noise. Bright = unusual.", "z"),
+     "", "z"),
     ("Filtered Z", "Filtered Z score",
-     "The Z score after 3 x 3 Gaussian smoothing, which removes single-pixel noise.", "smoothed_z"),
+     "", "smoothed_z"),
     ("Detections", "Foreground mask, blobs and tracks",
-     "Pixels above their threshold are grouped into blobs and followed from frame to frame. "
-     "The tracks feed the thermal features of the fused system.", "mask"),
+     ""
+     "", "mask"),
 ]
 Z_DISPLAY_MAX = 10.0
 
-# ---------------------------------------------------------------- GUI (display only)
-# Nothing below does any processing: the GUI only reads the latest results, so
-# switching views never pauses or recalibrates the system.
-
-# Light, high-contrast theme: the demo is outdoors in daylight
 THEME = {
     "bg": "#ffffff", "card": "#f6f8fb", "raised": "#e9eef4", "border": "#cfd7e2",
     "text": "#0f172a", "muted": "#475569", "accent": "#1d4ed8", "accent_hover": "#2563eb",
     "green": "#16a34a", "yellow": "#facc15", "red": "#dc2626", "off": "#dde3ea",
 }
-# Lamp / fill colours, and darker versions of the same colours for text on white
 STATE_COLOURS = {"NO INTRUDER": THEME["green"], "MAYBE INTRUDER": THEME["yellow"], "INTRUDER": THEME["red"]}
 STATE_TEXT = {"NO INTRUDER": "#15803d", "MAYBE INTRUDER": "#a16207", "INTRUDER": "#b91c1c"}
-# Requirement 4: alarm within 10 s of the person entering
 RESPONSE_LIMIT_S = 10.0
 WINDOW_SIZE = "1120x740"
-
 
 # First Installed Font From A Preference List (ROCK: DejaVu Sans)
 def pickFont(root):
@@ -98,7 +71,6 @@ def pickFont(root):
         if name in families:
             return name
     return "TkDefaultFont"
-
 
 # Colour Maps For The Thermal Stage Images (numpy look-up tables, display only)
 def colourTable(anchors):
@@ -126,7 +98,6 @@ def toPpm(rgb):
 def hexColour(rgb):
     return "#%02x%02x%02x" % tuple(int(v) for v in rgb)
 
-
 class Card(tk.Frame):
     """Dark rounded-look panel with a title and a one-line explanation."""
 
@@ -143,10 +114,7 @@ class Card(tk.Frame):
                                      anchor="w", justify="left")
             self.subtitle.pack(fill="x", pady=(2, 8))
 
-
 class Lamps(tk.Canvas):
-    """A row of indicator lights; only the current state is lit."""
-
     def __init__(self, parent, fonts, states, width=420):
         super().__init__(parent, width=width, height=96, bg=THEME["card"], highlightthickness=0)
         self.states = states
@@ -167,7 +135,6 @@ class Lamps(tk.Canvas):
             self.itemconfigure(glow, outline=colour if lit else "", width=3)
             self.itemconfigure(text, fill=THEME["text"] if lit else THEME["muted"])
 
-
 def makeButton(parent, fonts, text, command):
     button = tk.Button(parent, text=text, command=command, takefocus=0, font=fonts["button"],
                        bg=THEME["accent"], fg="white", activebackground=THEME["accent_hover"],
@@ -175,7 +142,6 @@ def makeButton(parent, fonts, text, command):
     button.bind("<Enter>", lambda _e: button.configure(bg=THEME["accent_hover"]))
     button.bind("<Leave>", lambda _e: button.configure(bg=THEME["accent"]))
     return button
-
 
 def makeSmallButton(parent, fonts, text, command):
     button = tk.Button(parent, text=text, command=command, takefocus=0, font=fonts["button"], width=2,
@@ -185,14 +151,10 @@ def makeSmallButton(parent, fonts, text, command):
     button.bind("<Leave>", lambda _e: button.configure(bg=THEME["accent"]))
     return button
 
-
 def stateText(state):
     return state if state in STATE_COLOURS else "UNAVAILABLE"
 
-
 class MainView(tk.Frame):
-    """Fused system vs thresholded PIR, processing time and the fused detection log."""
-
     def __init__(self, parent, fonts, on_toggle, on_threshold):
         super().__init__(parent, bg=THEME["bg"], padx=22, pady=18)
         self.fonts = fonts
@@ -396,10 +358,7 @@ class MainView(tk.Frame):
         self.processing_note.configure(text="" if worst is None else f"Slowest this run: {worst:.1f} ms")
         self.status.configure(text=item.get("status", ""))
 
-
 class SensorView(tk.Frame):
-    """Live PIR signal and the thermopile processing stages (keys 1-5). Display only."""
-
     def __init__(self, parent, fonts, on_toggle):
         super().__init__(parent, bg=THEME["bg"], padx=22, pady=18)
         self.fonts = fonts
@@ -601,7 +560,6 @@ class SensorView(tk.Frame):
             canvas.create_text(8, 8, anchor="nw", text="Glitch frame - previous features held",
                                fill=THEME["red"], font=self.fonts["small_bold"])
 
-
 class LiveGUI:
     def __init__(self, root, system):
         self.root = root
@@ -704,7 +662,6 @@ class LiveGUI:
     def close(self):
         self.shutdown()
         self.root.destroy()
-
 
 class RealTimeSystem:
     def __init__(self, folder):

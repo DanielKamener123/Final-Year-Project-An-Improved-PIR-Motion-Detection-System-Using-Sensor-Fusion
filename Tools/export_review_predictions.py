@@ -1,15 +1,3 @@
-"""Export the first-principles model's outputs for the synchronised playback review tool.
-
-Run from your project root:
- python -m Tools.export_review_predictions                         (every validation and testing recording)
- python -m Tools.export_review_predictions --recording Datasets/validation/NAME
-
-Uses the most recently trained real-time model (Processed/realtime/fusion_gb.json,
-written by offlineRun.py --train, which also runs this export automatically) with its
-frozen alarm thresholds, and writes review_predictions.csv into each recording. The
-playback tool then shows the model's confidence and state and can jump between false
-alarms. Recordings without labels.csv are still predicted; they are marked unlabelled.
-"""
 from __future__ import annotations
 
 import argparse

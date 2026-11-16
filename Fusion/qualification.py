@@ -1,37 +1,3 @@
-"""Qualification tests (report Section 4) from the testing recordings.
-
-offlineRun.py --test runs the exported model once over Datasets/testing; this
-module splits that single run into the report's qualification tests:
-
-  QT1  Requirement 1      seen site, day: distance walks, edge walks and empty scenes
-  QT2  Requirements 2, 3  seen site, day: distance walks (range, speed), edge walks (field of view)
-  QT3  Requirement 4      detection delay of the QT1 entries (per speed class from QT2)
-  QT4  Field conditions   day vs night, two people in the zone
-  Unseen site             same as QT1 for any site other than SEEN_SITE (not a proposal requirement)
-
-Recording folder names carry the test information:
-    <Site>_<Test>_<Day|Night>[_anything]
-    Test = <d>m                  walks across the zone at d metres (3 walks per speed class)
-           Edge+55 / Edge-55     walks along a field of view edge
-           Empty                 nobody enters
-           2People-SideBySide    two people entering together
-           2People-Apart         two people entering a few seconds apart
-    e.g. Garden_4m_Day, Garden_Edge+55_Day, Garden_Empty_Night, Garden_2People-Apart_Day
-
-Walk speed = the target speed of the walk's speed class (SPEED_CLASS_MS); it is not
-calculated from the walking line length and the labelled time. The speed class of
-each walk comes from the recording's speed_classes.csv (one row per labelled walk in
-time order) or, without that file, from the walking order of the protocol: three
-Fast, three Medium, three Slow, then three Very slow walks (12 walks).
-
-Outputs (all in the run folder):
-    report.txt              every number, the pass rules and any warnings
-    tables/*.tex            one LaTeX table per report table (same labels as Section 4)
-    tables.tex              all of them in one file
-    qt*.png, unseen_*.png   report figures
-    timelines/              one timeline per testing recording
-    details/                full evaluation (Ward, false alarms, operating curve) of the QT1 data
-"""
 from pathlib import Path
 from datetime import datetime
 import json
@@ -52,35 +18,30 @@ from Fusion.evaluation import (MAX_DELAY_S, TARGET_ACC_GAIN, TARGET_PFA_DROP, Re
 from Fusion.realtimeModel import INTRUDER
 from Fusion import report
 
+SEEN_SITE = "Driveway"                 
+HALF_FOV_DEG = 55.0                  
 
-# Config
-SEEN_SITE = "Driveway"                 # site the model was trained at (first word of the folder name)
-HALF_FOV_DEG = 55.0                  # half of the 110 deg detection zone
-# Measured walking line length (m) at each distance; None = use 2 d tan(55 deg)
 PATH_LENGTH_M = {1: 1.84, 4: 5.96, 7: 10.88, 10: 12.88}
-#PATH_LENGTH_M = {1: None, 4: None, 7: None, 10: None}
+
 SPEED_CLASSES = ("Very slow", "Slow", "Medium", "Fast")
-# Target speed of each speed class (m/s), used as the speed of every walk in that class
+
 SPEED_CLASS_MS = {"Very slow": 0.2, "Slow": 0.5, "Medium": 1.4, "Fast": 5.0}
-# Protocol walking order when a recording has no speed_classes.csv
+
 PROTOCOL_ORDER = ("Fast", "Medium", "Slow", "Very slow")
 WALKS_PER_CLASS = 3
-REQUIRED_RANGE_M = (1.0, 10.0)       # Requirement 2
-REQUIRED_SPEED_MS = (0.2, 5.0)       # Requirement 3
+REQUIRED_RANGE_M = (1.0, 10.0)       
+REQUIRED_SPEED_MS = (0.2, 5.0)       
 
 PIR = "Thresholded PIR"
 FUSED = "Fused system"
 MULTI_TYPES = {"sidebyside": "Side by side", "apart": r"Separated by $\sim$3~s"}
 
-
-# ---------------------------------------------------------------------------
-# Recording names
-# ---------------------------------------------------------------------------
-
-# Reads The Test Information From A Recording Folder Name
+# Identify the site, test type and conditions from folder names
 def parseRecordingName(name):
     info = {"name": name, "site": None, "kind": None, "distance": None, "edge": None,
             "people": None, "condition": None}
+
+    # Separate the folder name into its test fields
     parts = name.split("_")
     if len(parts) < 3:
         return info
@@ -92,6 +53,8 @@ def parseRecordingName(name):
     distance = re.fullmatch(r"(\d+(?:\.\d+)?)m", test, flags=re.IGNORECASE)
     edge = re.fullmatch(r"edge([+-])55", test, flags=re.IGNORECASE)
     multi = re.fullmatch(r"2people-(sidebyside|apart)", test, flags=re.IGNORECASE)
+
+    # Identify distance walks from the recording name
     if distance:
         info["kind"] = "distance"
         info["distance"] = float(distance.group(1))
@@ -105,14 +68,16 @@ def parseRecordingName(name):
         info["people"] = multi.group(1).lower()
     return info
 
-
+# Use a measured walking path or calculate it from the field of view
 def pathLength(distance):
     measured = PATH_LENGTH_M.get(int(round(distance))) if float(distance).is_integer() else None
+
+    # Prefer the actual measured walking path
     if measured:
         return float(measured), True
     return 2.0 * distance * math.tan(math.radians(HALF_FOV_DEG)), False
 
-
+# Describe the recording for the results table
 def contentText(info, entries):
     kind = info["kind"]
     if kind == "distance":
@@ -125,11 +90,7 @@ def contentText(info, entries):
         return f"{entries} two-person entries ({MULTI_TYPES[info['people']].lower()})"
     return f"{entries} entries"
 
-
-# ---------------------------------------------------------------------------
-# Per-walk results
-# ---------------------------------------------------------------------------
-
+# Find the first intrusion alarm within the allowed response time
 def firstIntruder(times, states, s, e):
     deadline = min(times[s] + MAX_DELAY_S, times[e])
     for k in range(s, e + 1):
@@ -139,21 +100,20 @@ def firstIntruder(times, states, s, e):
             return float(times[k] - times[s])
     return None
 
-
-# Response Time: first INTRUDER while the person is still in the zone (no 10 s limit).
-# Used by QT2 (was the walk detected at all) and QT3 (how long it took).
+# Find the first alarm while the person is inside the zone
 def firstIntruderInZone(times, states, s, e):
     for k in range(s, e + 1):
         if states[k] == INTRUDER:
             return float(times[k] - times[s])
     return None
 
-
-# One Row Per Labelled Entry (same detection rule as the Pd in Fusion/evaluation.py)
+# Collect detection results and response times for every walk
 def walkTable(data, warnings):
     rows = []
     fused = data["fusedState"].to_numpy()
     pir = data["pirState"].to_numpy()
+
+    # Process recordings separately in time order
     for item in Recordings(data).items:
         name = Path(item["recording"]).name
         info = parseRecordingName(name)
@@ -166,10 +126,12 @@ def walkTable(data, warnings):
         times = item["times"]
         fusedStates = fused[item["idx"]]
         pirStates = pir[item["idx"]]
+
+        # Evaluate each labelled entry individually
         for number, (s, e) in enumerate(item["entries"], start=1):
             match = [(a, b) for a, b in intervals if a <= times[s] < b]
             duration = float(match[0][1] - match[0][0]) if match else float(times[e] - times[s])
-            speed = None       # set from the speed class below (target speed, not calculated)
+            speed = None       
             fusedDelay = firstIntruder(times, fusedStates, s, e)
             pirDelay = firstIntruder(times, pirStates, s, e)
             fusedResponse = firstIntruderInZone(times, fusedStates, s, e)
@@ -195,9 +157,8 @@ def walkTable(data, warnings):
     walks["speedClass"] = None
     recordingPaths = {Path(r).name: Path(r) for r in data["recording"].unique()}
     for name, group in walks[walks["kind"] == "distance"].groupby("recording"):
-        # Speed class of every walk as walked (optional speed_classes.csv, one row per
-        # labelled walk in time order, column "speed_class"). This keeps the classes
-        # correct when a recording has extra or missing walks.
+        
+        # Read optional speed class labels for each walk
         classFile = recordingPaths[name] / "speed_classes.csv"
         if classFile.is_file():
             classes = pd.read_csv(classFile)["speed_class"].astype(str).str.strip().tolist()
@@ -213,8 +174,8 @@ def walkTable(data, warnings):
                     warnings.append(f"{name}: {counts.get(speedClass, 0)} {speedClass.lower()} walks "
                                     f"instead of {WALKS_PER_CLASS}.")
             continue
-        # No speed_classes.csv: the protocol order (three walks per class) is only used
-        # when the recording has exactly the expected number of walks
+        
+        # Fall back to the specified walk order when labels are absent
         expected = WALKS_PER_CLASS * len(SPEED_CLASSES)
         if len(group) != expected:
             raise ValueError(f"{name}: {len(group)} walks instead of {expected}. Add "
@@ -223,21 +184,19 @@ def walkTable(data, warnings):
         ordered = group.sort_values("walk").index.to_numpy()
         for speedClass, members in zip(PROTOCOL_ORDER, np.split(ordered, len(PROTOCOL_ORDER))):
             walks.loc[members, "speedClass"] = speedClass
-    # Speed of every distance walk = target speed of its class
+    
     isDistance = walks["kind"] == "distance"
+
+    # Assign the target speed for each class
     walks.loc[isDistance, "speed_ms"] = walks.loc[isDistance, "speedClass"].map(SPEED_CLASS_MS)
     walks["speed_ms"] = pd.to_numeric(walks["speed_ms"], errors="coerce")
     return walks
 
-
-# ---------------------------------------------------------------------------
-# Groups of recordings
-# ---------------------------------------------------------------------------
-
+# Keep only recordings from the requested group
 def subset(data, names):
     return data[data["recording"].map(lambda r: Path(r).name in names)].reset_index(drop=True)
 
-
+# Find recordings matching the selected site and test conditions
 def selectNames(infos, site=None, unseen=False, condition=None, kinds=None):
     names = []
     for name, info in infos.items():
@@ -254,14 +213,15 @@ def selectNames(infos, site=None, unseen=False, condition=None, kinds=None):
         names.append(name)
     return names
 
-
-# Pd / Pfa / accuracy of both systems on one group, plus the Requirement 1 comparison
+# Evaluate both systems and compare them against Requirement 1
 def groupMetrics(data):
     if data.empty:
         return None
     recordings = Recordings(data)
     metrics = {PIR: evaluateStates(data, data["pirState"].to_numpy(), recordings),
                FUSED: evaluateStates(data, data["fusedState"].to_numpy(), recordings)}
+
+    # Calculate improvement relative to the PIR baseline
     comparison = compareToPir(metrics[FUSED], metrics[PIR])
     durations = intervalSeconds(data)
     human = data["human"].to_numpy() == 1
@@ -269,33 +229,31 @@ def groupMetrics(data):
              "Human Seconds": float(durations[human].sum()), "Negative Seconds": float(durations[~human].sum())}
     return {"metrics": metrics, "comparison": comparison, **extra}
 
-
+# Calculate the duration covered by each fusion decision
 def intervalSeconds(data):
     from Fusion.evaluation import intervalDurations
     seconds = np.zeros(len(data))
+
+    # Process recordings separately in time order
     for item in Recordings(data).items:
         seconds[item["idx"]] = intervalDurations(item["times"])
     return seconds
 
-
-# ---------------------------------------------------------------------------
-# Formatting
-# ---------------------------------------------------------------------------
-
+# Format missing and numeric values for the report
 def num(value, decimals=1):
     if value is None or (isinstance(value, float) and not np.isfinite(value)):
         return "--"
     return f"{float(value):.{decimals}f}"
 
-
+# Convert a requirement result into PASS or FAIL
 def passText(ok):
     return "PASS" if ok else "FAIL"
 
-
+# Escape special characters for LaTeX tables
 def texEscape(text):
     return str(text).replace("_", r"\_").replace("&", r"\&").replace("%", r"\%")
 
-
+# Build a formatted LaTeX table from supplied data
 def texTable(columns, header, rows, caption, label, tabularx=False):
     lines = [r"\begin{table}[H]", r"\centering", r"\fontsize{10}{12}\selectfont"]
     lines.append(rf"\begin{{tabularx}}{{\linewidth}}{{{columns}}}" if tabularx else rf"\begin{{tabular}}{{{columns}}}")
@@ -311,11 +269,7 @@ def texTable(columns, header, rows, caption, label, tabularx=False):
     lines += [rf"\caption{{{caption}}}", rf"\label{{{label}}}", r"\end{table}"]
     return "\n".join(lines) + "\n"
 
-
-# ---------------------------------------------------------------------------
-# Tables (text for report.txt, LaTeX for the report)
-# ---------------------------------------------------------------------------
-
+# Summarise detection, accuracy and false alarms for Requirement 1
 def requirementOneTables(group, label, caption, title):
     lines = [f"\n{title}"]
     if group is None:
@@ -348,7 +302,7 @@ def requirementOneTables(group, label, caption, title):
                    caption.format(n=group["Entries"], negatives=group["Negative Intervals"]), label)
     return lines, tex
 
-
+# Evaluate range, walking speed and field of view
 def qt2Tables(walks, edgeWalks, warnings):
     lines = ["\nQT2: RANGE, FIELD OF VIEW AND SPEED (Requirements 2 and 3)",
              "  Cells: walks detected by fused system / thresholded PIR (out of n)."]
@@ -358,6 +312,8 @@ def qt2Tables(walks, edgeWalks, warnings):
     else:
         distances = sorted(walks["distance"].unique())
         rows, textRows = [], []
+
+        # Count successful detections at each distance
         for d in distances:
             atDistance = walks[walks["distance"] == d]
             cells, textCells = [], []
@@ -391,9 +347,10 @@ def qt2Tables(walks, edgeWalks, warnings):
         lines.append("  Speeds are the target speed of each class: " +
                      ", ".join(f"{c} {SPEED_CLASS_MS[c]:g} m/s" for c in SPEED_CLASSES))
 
-    # Edge walks
     lines.append("  Edge walks:")
     edgeRows = []
+
+    # Check both boundaries of the sensor field of view
     for edge in ("+55", "-55"):
         e = edgeWalks[edgeWalks["edge"] == edge] if not edgeWalks.empty else edgeWalks
         lines.append(f"    {edge} deg: {len(e)} walks, fused {int(e['fusedDetected'].sum()) if len(e) else 0}, "
@@ -404,7 +361,7 @@ def qt2Tables(walks, edgeWalks, warnings):
                                 r"Detections for walks along the edges of the $110^\circ$ field of view.",
                                 "tab:qt2_edges")
 
-    # Pass / fail
+    # Require every distance walk to be detected
     allDetected = bool(len(walks)) and bool(walks["fusedDetected"].all())
     if len(walks):
         dmin, dmax = walks["distance"].min(), walks["distance"].max()
@@ -437,13 +394,17 @@ def qt2Tables(walks, edgeWalks, warnings):
         "Requirement 2 and 3 outcomes.", "tab:qt2_passfail")
     return lines, tex, {"range": rangeOk, "fov": fovOk, "speed": speedOk}
 
-
+# Summarise response times and identify late alarms
 def qt3Tables(qt1Walks, qt2Walks):
     """Response time of EVERY entry: first INTRUDER while the person is in the zone (no 10 s
     limit), so an entry alarmed late is reported here with its real response time."""
     lines = ["\nQT3: RESPONSE TIME (Requirement 4)"]
+
+    # Separate alarmed entries from entries with no alarm
     seen = qt1Walks[qt1Walks["fusedSeen"]]
     response = seen["fusedResponse"].to_numpy(dtype=float)
+
+    # Count responses within the ten second limit
     within = int(np.sum(response <= MAX_DELAY_S))
     late = seen[seen["fusedResponse"] > MAX_DELAY_S]
     never = len(qt1Walks) - len(seen)
@@ -492,7 +453,7 @@ def qt3Tables(qt1Walks, qt2Walks):
                                       "tab:qt3_speed_delay")
     return lines, tex, delayOk
 
-
+# Compare day, night and multiple person tests
 def qt4Tables(groups, multiWalks, qt1Group):
     lines = ["\nQT4: FIELD CONDITIONS"]
     rows = []
@@ -530,7 +491,7 @@ def qt4Tables(groups, multiWalks, qt1Group):
                                       multiRows, "Detections with two people in the detection zone.",
                                       "tab:qt4_multiperson")
 
-    # Pass / fail: day and night = Requirement 1 met on that data; two people = every entry alarmed
+    # Check performance for one environmental condition
     def conditionResult(walkGroup, emptyGroup, data):
         if data is None:
             return "--", "--"
@@ -540,6 +501,7 @@ def qt4Tables(groups, multiWalks, qt1Group):
         return (f"Pd {num(m['Event Pd (%)'])}\\%, Pfa {num(m['Pfa (%)'])}\\%, accuracy gain "
                 f"{num(c['Accuracy Gain (%)'])}\\%, Pfa reduction {num(c['Pfa Reduction (%)'])}\\%"), passText(ok)
 
+    # Check the daytime requirement result
     day = conditionResult(groups["dayWalks"], groups["dayEmpty"], qt1Group)
     night = conditionResult(groups["nightWalks"], groups["nightEmpty"], groups["night"])
     multiOk = bool(len(multiWalks)) and bool(multiWalks["fusedDetected"].all())
@@ -556,13 +518,10 @@ def qt4Tables(groups, multiWalks, qt1Group):
     tex["qt4_passfail"] = tex["qt4_passfail"].replace("{|l|c|c|}", "{|p{4.2cm}|p{8cm}|c|}")
     return lines, tex
 
-
-# ---------------------------------------------------------------------------
-# Figures
-# ---------------------------------------------------------------------------
-
+# Plot the distribution of intrusion alarm delays
 def figDelayHistogram(walks, out, filename="qt3_delay_histogram.png"):
-    # Every alarmed entry, including any alarmed after the 10 s requirement
+    
+    # Collect response delays including late detections
     delays = walks.loc[walks["fusedSeen"], "fusedResponse"].to_numpy(dtype=float)
     fig, ax = plt.subplots(figsize=(report.FIG_WIDTH * 0.85, 2.8))
     upper = max(MAX_DELAY_S, float(np.max(delays)) if len(delays) else 0.0) + 1.0
@@ -580,9 +539,7 @@ def figDelayHistogram(walks, out, filename="qt3_delay_histogram.png"):
     fig.savefig(out / filename)
     plt.close(fig)
 
-
-# Every Distance Walk: speed vs distance. Filled = alarmed within 10 s, open = alarmed
-# while in the zone but after 10 s, cross = never alarmed
+# Plot detection results across distance and speed
 def figWalks(walks, out, filename="qt2_walks.png"):
     fig, axes = plt.subplots(1, 2, figsize=(report.FIG_WIDTH, 3.0), sharey=True)
     for ax, column, seenColumn, name, colour in [(axes[0], "fusedDetected", "fusedSeen", FUSED, report.SYSTEM_COLOURS[0]),
@@ -590,7 +547,7 @@ def figWalks(walks, out, filename="qt2_walks.png"):
         hit = walks[walks[column]]
         lateHit = walks[walks[seenColumn] & ~walks[column]]
         miss = walks[~walks[seenColumn]]
-        # Walks of one class share a target speed: spread them slightly so all three show
+        
         spread = walks.groupby(["distance", "speedClass"]).cumcount() - 1
         x = walks["speed_ms"] * (1.0 + 0.12 * spread)
         ax.scatter(x[hit.index], hit["distance"], s=28, color=colour, edgecolor="white", linewidth=0.8)
@@ -604,7 +561,7 @@ def figWalks(walks, out, filename="qt2_walks.png"):
         ax.minorticks_off()
         ax.set_ylim(0, max(11, float(walks["distance"].max()) + 1))
         ax.set_xlabel("Target walking speed (m/s)", fontsize=9)
-        # Panel label (which system), kept even though figure titles are off
+        
         ax.set_title(name, loc="left", fontsize=9, fontweight="normal")
     axes[0].set_ylabel("Distance from sensor (m)", fontsize=9)
     fig.legend(handles=[Line2D([], [], marker="o", linestyle="", color=report.TEXT_2, label="Detected within 10 s"),
@@ -616,11 +573,7 @@ def figWalks(walks, out, filename="qt2_walks.png"):
     fig.savefig(out / filename)
     plt.close(fig)
 
-
-# ---------------------------------------------------------------------------
-# Dataset summary (Section 3 data paragraph and the data split table)
-# ---------------------------------------------------------------------------
-
+# Summarise the duration and labels of one recording
 def recordingSummary(folder, split):
     folder = Path(folder)
     with open(folder / "metadata.json", "r", encoding="utf-8") as metadataFile:
@@ -645,9 +598,8 @@ def recordingSummary(folder, split):
             "Content": contentText(info, entries) if info["kind"] else f"{entries} entries",
             "Labelled": labelsPath.is_file()}
 
-
+# Summarise recordings and label coverage for each dataset split
 def datasetSummary(splits):
-    """splits: {"Training": Path, "Validation": Path, "Testing": Path}"""
     from Fusion.dataset import recordingFolders
     rows, problems = [], []
     for split, path in splits.items():
@@ -681,13 +633,8 @@ def datasetSummary(splits):
                    "Recordings used for training, validation and testing.", "tab:data_split", tabularx=True)
     return lines, table, tex
 
-
-# ---------------------------------------------------------------------------
-# Main entry: offlineRun.py --test
-# ---------------------------------------------------------------------------
-
+# Run all qualification tests and save the final results
 def writeQualificationReport(runName, evalData, scores, model, outDir, description, splits):
-    """evalData: testing data with outbound labels; scores: fused confidence per row."""
     out = Path(outDir)
     out.mkdir(parents=True, exist_ok=False)
     (out / "tables").mkdir()
@@ -708,6 +655,7 @@ def writeQualificationReport(runName, evalData, scores, model, outDir, descripti
     if not any(info["site"] == SEEN_SITE for info in infos.values()):
         warnings.append(f"No recordings from the seen site '{SEEN_SITE}' (change SEEN_SITE in Fusion/qualification.py).")
 
+    # Define the recording groups used for each qualification test
     groupNames = {
         "qt1": selectNames(infos, site=SEEN_SITE, condition="Day", kinds=("distance", "edge", "empty")),
         "dayWalks": selectNames(infos, site=SEEN_SITE, condition="Day", kinds=("distance", "edge")),
@@ -718,6 +666,8 @@ def writeQualificationReport(runName, evalData, scores, model, outDir, descripti
         "multi": selectNames(infos, site=SEEN_SITE, kinds=("multi",)),
         "unseen": selectNames(infos, unseen=True, condition="Day", kinds=("distance", "edge", "empty")),
     }
+
+    # Calculate metrics for each test group
     groups = {key: groupMetrics(subset(data, value)) if value else None for key, value in groupNames.items()}
 
     named = subset(data, [n for n in names if n not in ignored])
@@ -735,22 +685,29 @@ def writeQualificationReport(runName, evalData, scores, model, outDir, descripti
         lines.append(f"  {key:10s}: {', '.join(value) if value else '-'}")
 
     tex = {}
+
+    # Generate Requirement 1 results
     qt1Lines, tex["qt1_results"] = requirementOneTables(
         groups["qt1"], "tab:qt1_results",
         "Fused system compared to the thresholded PIR on the testing recordings ($n = {n}$ entries, "
         "{negatives} non-human intervals).", "QT1: FUSED SYSTEM VS PIR ON ITS OWN (Requirement 1)")
     lines += qt1Lines
-    # QT2 counts a walk as detected if INTRUDER is reached while the person is in the zone
-    # (capability at each distance, edge and speed); timing is QT3 and reliability is the Pd in QT1
+    
     inZone = lambda w: w.assign(fusedDetected=w["fusedSeen"], pirDetected=w["pirSeen"])
+
+    # Generate range, speed and edge results
     qt2Lines, qt2Tex, _ = qt2Tables(inZone(qt2Walks), inZone(edgeWalks), warnings)
     qt2Lines.insert(2, f"  (detected = INTRUDER while the person is in the zone; within 10 s: fused "
                        f"{int(qt2Walks['fusedDetected'].sum())}/{len(qt2Walks)}, PIR {int(qt2Walks['pirDetected'].sum())}/{len(qt2Walks)})")
     lines += qt2Lines
     tex.update(qt2Tex)
+
+    # Generate response time results
     qt3Lines, qt3Tex, _ = qt3Tables(qt1Walks, qt2Walks)
     lines += qt3Lines
     tex.update(qt3Tex)
+
+    # Generate environmental and multiple person results
     qt4Lines, qt4Tex = qt4Tables(groups, multiWalks, groups["qt1"])
     lines += qt4Lines
     tex.update(qt4Tex)
@@ -768,14 +725,16 @@ def writeQualificationReport(runName, evalData, scores, model, outDir, descripti
                      f"{num(w['speed_ms'], 2):>6} | {str(w['speedClass'] or '-'):9s} | "
                      f"{num(w['fusedDelay'], 2) if w['fusedDetected'] else 'missed':>11} | "
                      f"{num(w['pirDelay'], 2) if w['pirDetected'] else 'missed':>9}")
+
+    # Export individual walk results for inspection
     walks.to_csv(out / "walks.csv", index=False)
 
+    # Summarise the training, validation and testing datasets
     summaryLines, _, splitTex = datasetSummary(splits)
     lines += summaryLines
     if splitTex:
         tex["data_split"] = splitTex
 
-    # Figures
     systems = {PIR: {"states": data["pirState"].to_numpy()},
                FUSED: {"scores": data["fusedScore"].to_numpy(), "thresholds": model.thresholds,
                        "states": data["fusedState"].to_numpy()}}
@@ -788,6 +747,8 @@ def writeQualificationReport(runName, evalData, scores, model, outDir, descripti
         figWalks(qt2Walks, out)
     if len(qt1Walks):
         figDelayHistogram(qt1Walks, out)
+
+    # Prepare the individual recording timelines
     timelineFolder = out / "timelines"
     timelineFolder.mkdir()
     report.figTimelines(data, systems, colours, "testing", timelineFolder)
@@ -796,7 +757,6 @@ def writeQualificationReport(runName, evalData, scores, model, outDir, descripti
         if source.is_file():
             shutil.copy(source, out / f"qt4_timeline_{name}.png")
 
-    # Full evaluation (Ward, false alarms, operating curve) of the QT1 data
     if groupNames["qt1"]:
         qt1Data = subset(data, groupNames["qt1"])
         qt1Systems = {PIR: {"states": qt1Data["pirState"].to_numpy()},
@@ -806,9 +766,10 @@ def writeQualificationReport(runName, evalData, scores, model, outDir, descripti
                                      "QT1 recordings only (seen site, day).", "QT1",
                                      featureNames=model.features, importance=model.importance, timelines=False)
 
-    # LaTeX tables
     order = ["qt1_results", "qt2_range_speed", "qt2_edges", "qt2_passfail", "qt3_response", "qt3_speed_delay",
              "qt4_daynight", "qt4_multiperson", "qt4_passfail", "unseen_results", "data_split"]
+
+    # Collect the LaTeX tables into one file
     combined = ["% Generated by offlineRun.py --test. Numbers only; check them against report.txt.\n"]
     for key in order:
         if tex.get(key):
