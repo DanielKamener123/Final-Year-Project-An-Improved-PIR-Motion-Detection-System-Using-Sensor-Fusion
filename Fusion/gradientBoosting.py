@@ -4,26 +4,21 @@ from pathlib import Path
 import numpy as np
 
 # Training settings
-# 100 small trees, each with at most three split levels
-# Learning rate controls how much each tree changes the prediction
-# Minimum leaf size avoids fitting to very small groups
 N_TREES = 100
 MAX_DEPTH = 3
 LEARNING_RATE = 0.1
 MIN_SAMPLES_LEAF = 20
 
-# Special value used to mark the end of a tree branch
+# Value used to mark end of a tree branch
 LEAF = -1
 
 # Converts the model score from log odds to a probability
-# The tanh form handles very large scores safely
 def sigmoid(F):
     return 0.5 * (1.0 + np.tanh(0.5 * np.asarray(F, dtype=np.float64)))
 
 # Find the best feature and threshold for splitting a tree node
 # Choose the split that best separates the remaining prediction errors
 def bestSplit(X, residual, rows, minSamplesLeaf):
-
     # Track the best split found so far
     best = None
     count = len(rows)
@@ -39,7 +34,7 @@ def bestSplit(X, residual, rows, minSamplesLeaf):
     # Test each input feature as a possible split
     for feature in range(X.shape[1]):
 
-        # Sort feature values so possible split points are adjacent
+        # Sort feature values from smallest to biggest
         values = X[rows, feature]
         order = np.argsort(values, kind="stable")
         sortedValues = values[order]
@@ -48,14 +43,14 @@ def bestSplit(X, residual, rows, minSamplesLeaf):
         if sortedValues[0] == sortedValues[-1]:
             continue
 
-        # Cumulative errors on the left and right of each split
+        # Cumulative errors on the left and right of each split 
+        # Gives the residual sum of the left side at every cut point in one step
         leftSum = np.cumsum(nodeResidual[order])[:-1]
         rightSum = total - leftSum
 
         # Only split between different values
         # Both child nodes must contain enough samples
-        valid = ((sortedValues[:-1] < sortedValues[1:])
-                 & (leftCount >= minSamplesLeaf) & (rightCount >= minSamplesLeaf))
+        valid = ((sortedValues[:-1] < sortedValues[1:]) & (leftCount >= minSamplesLeaf) & (rightCount >= minSamplesLeaf))
         if not valid.any():
             continue
 
@@ -155,10 +150,7 @@ def leafIndex(tree, X):
 
     return node
 
-# Custom gradient boosting classifier for human detection
 class GradientBoosting:
-
-    # Store training settings and initialise model data
     def __init__(self, nTrees=N_TREES, maxDepth=MAX_DEPTH, learningRate=LEARNING_RATE,
                  minSamplesLeaf=MIN_SAMPLES_LEAF):
         self.nTrees = int(nTrees)
@@ -190,8 +182,6 @@ class GradientBoosting:
         # Check that feature names and training labels are valid
         if X.shape[1] != len(featureNames):
             raise ValueError("Feature names do not match the training columns")
-        if not np.isin(y, [0, 1]).all() or len(np.unique(y)) != 2:
-            raise ValueError("Training labels must contain both 0 and 1")
 
         # Calculate a median replacement value for each feature
         self.features = list(featureNames)
@@ -307,7 +297,8 @@ class GradientBoosting:
         return path
 
     # Load a previously saved model for prediction
-    @classmethod
+    # Classmethod allows load to be called without needing a model first - Alternative class constructor
+    @classmethod 
     def load(cls, path):
 
         # Read saved training settings and tree data

@@ -4,10 +4,10 @@ from collections import deque
 
 import numpy as np
 
-# Warm Up Time
 warmupTime = 10
-
 threshold = 0.2
+
+# Default but can be changed from real time JSON model
 rollingWindow = 1.5
 
 # Baseline corrected Samples
@@ -35,7 +35,7 @@ def getHistoryFeatureVector(samples):
     active = np.abs(values) >= float(threshold)
     # Get all intervals between samples
     intervals = np.diff(timestamps)
-    # Remove invalid samples
+    # Remove any invalid samples
     valid_intervals = intervals[np.isfinite(intervals) & (intervals > 0)]
     # Get estimated sample period
     sample_period = float(np.median(valid_intervals)) if valid_intervals.size else 0.0
@@ -56,7 +56,6 @@ def getHistoryFeatureVector(samples):
         peak_separation,
     ])
 
-
 def getHistoryFeatureNames():
     return [
         "pirPositivePeak",
@@ -69,16 +68,17 @@ def getHistoryFeatureNames():
 
 class PIRProcessor:
     def __init__(self, sampleQueue: queue.Queue | None = None, initialBaseline=None, windowTime=rollingWindow):
-        if windowTime <= 0:
-            raise ValueError("windowTime must be greater than zero")
-
+        # Gets the aquisition tread passed in or none if offline
         self.sampleQueue = sampleQueue
+
+        # Output queue (only used for GUI)
         self.outputQueue = queue.Queue(maxsize=4096)
+
         self.windowTime = float(windowTime)
-        # History must always cover the feature window (e.g. 5 s windows)
+        # History must always cover the feature window
         self.maxHistoryTime = max(historyBuffer, self.windowTime)
 
-        # Baseline Voltage
+        # Baseline is none for real time (needs to be calibrated) but passed in for offline
         self.baselineVoltage = 0.0 if initialBaseline is None else float(initialBaseline)
 
         # Warm Up
@@ -89,6 +89,7 @@ class PIRProcessor:
         self.lastTime = None
         self.lastError = None
 
+        # Empty rolling buffer
         self.history = deque()
         self.historyLock = threading.Lock()
         self.stateLock = threading.Lock()
@@ -114,11 +115,14 @@ class PIRProcessor:
             self.initialised = True
 
     def processSample(self, ts, v):
+        # Get Timestamp, Voltage Pair
         ts, v = float(ts), float(v)
+
         if not np.isfinite(ts) or not np.isfinite(v):
             raise ValueError("PIR timestamp and voltage must be finite")
         if self.lastTime is not None and ts <= self.lastTime:
             raise ValueError("PIR timestamps must be strictly increasing")
+
         self.lastTime = ts
 
         # Make Sure System Is Warmed Up
@@ -132,8 +136,13 @@ class PIRProcessor:
         relative = v - baseline
 
         with self.historyLock:
+            # Adds new sample to history buffer
             self.history.append((ts, relative))
+
+            # Calculates cutoff time
             cutoff = ts - self.maxHistoryTime
+
+            # Remove oldest sample if history buffer is full
             while self.history and self.history[0][0] < cutoff:
                 self.history.popleft()
 
@@ -172,9 +181,6 @@ class PIRProcessor:
                 self.sampleQueue.task_done()
 
     def getWindowSamples(self, windowTime=rollingWindow, endTime=None):
-        if windowTime <= 0:
-            raise ValueError("windowTime must be greater than zero")
-
         with self.historyLock:
             samples = list(self.history)
 
@@ -206,29 +212,3 @@ def preprocessPIR(pirData, initialBaseline, windowSeconds):
         relative[index] = processor.processSample(timestamp, voltage)
 
     return timestamps, relative
-
-
-# Debug
-if __name__ == "__main__":
-    from PIR.interface import PIRAcquisition, sampleRateHz
-
-    sample_queue = queue.Queue(maxsize=2048)
-
-    acquisition = PIRAcquisition(sample_queue)
-
-    processor = PIRProcessor(sample_queue)
-
-    print("Calibrating")
-    acquisition.start()
-    processor.start()
-
-    try:
-        while True:
-            ts, v, relative = processor.outputQueue.get()
-            if processor.initialised and int(ts * 2) != int((ts - 1.0 / sampleRateHz) * 2):
-                np.set_printoptions(precision=4, suppress=True)
-                print(processor.snapshot(rollingWindow))
-    except KeyboardInterrupt:
-        processor.stop()
-        acquisition.stop()
-        print("\nStopped.")

@@ -17,9 +17,6 @@ from Thermopile.interface import getFrame, REFRESH_RATE_HZ
 from Thermopile.processing import ThermopilePipeline, FRAME_SHAPE
 from Fusion.realtimeModel import RealtimeModel, MODE_FUSED, MODE_PIR_BACKUP, NO_INTRUDER
 
-CALIBRATION_DISCARD_FRAMES = 20
-CALIBRATION_FRAMES = 40
-
 LOG_FOLDER = Path("Processed/live_logs")
 LOG_COLUMNS = ["timestamp", "pir_state", "fusion_state", "fusion_confidence",
                "pir_relative_voltage", "processing_ms", "pir_threshold_v"]
@@ -31,6 +28,7 @@ PIR_TIMEOUT_S = 1.0
 DECISION_PERIOD_S = 1.0 / REFRESH_RATE_HZ
 BACKGROUND_FILE = "thermal_background.json"
 
+# PIR Only Thresholds
 PIR_THRESHOLD_STEP_V = 0.05
 PIR_THRESHOLD_MIN_V = 0.05
 PIR_THRESHOLD_MAX_V = 1.60
@@ -673,15 +671,20 @@ class RealTimeSystem:
         self.pirProcessor = PIRProcessor(self.acquisitionQueue, windowTime=self.window)
         self.thermal = ThermopilePipeline(window_seconds=self.window)
         self.stopEvent = threading.Event()
-        # C key: recalibrate the thermal background on the next frames (zone must be empty)
+
+        # Recalibrate the thermal background on the next frames
         self.recalibrateEvent = threading.Event()
         self.lock = threading.Lock()
         self.latest = {"warmup": "Preparing sensors...", "status": "Starting"}
-        # Thermal frames are read on their own thread so a failed or hung read never
-        # stops the decisions; the decision thread waits on this queue.
+
+
+        # Thermal frames are read on their own thread so a failed or hung read never stops the decisions
+        # The decision thread waits on this queue.
+        # Deamon means threads die when program closed
         self.thermalQueue = queue.Queue(maxsize=8)
         self.thermalReader = threading.Thread(target=self.run_thermal_acquisition, daemon=True)
         self.worker = threading.Thread(target=self.run_thermal, daemon=True)
+
         # Latest thermal processing stages for the sensor view
         self.stages = None
         self.frameCount = 0
@@ -689,11 +692,13 @@ class RealTimeSystem:
         self.notices = {}
         # GUI log events (dicts): fused detections, entries marked with E, and response times
         self.events = []
+
         # Current timed entry (E key): wall-clock time and each system's response in seconds
         self.entry = None
         self.lastFusionState = None
         self.lastPirState = None
         self.processingMaxMs = 0.0
+
         # Decision log (opened once the system is ready)
         self.logFile = None
         self.logWriter = None
@@ -736,7 +741,7 @@ class RealTimeSystem:
     def request_recalibration(self):
         self.recalibrateEvent.set()
         print(time.strftime("[%H:%M:%S] ") + "Recalibrating thermopile - keep the detection zone EMPTY "
-              f"for the next {CALIBRATION_FRAMES} frames", flush=True)
+              f"for the next 40 frames", flush=True)
 
     def clear_entry(self):
         with self.lock:
@@ -949,12 +954,6 @@ class RealTimeSystem:
                      status=f"PIR = 32 Hz | Thermal = 2 Hz")
 
     def _run_thermal(self):
-        # Calibrate the PIR baseline and thermal background with an empty detection zone.
-        # Collect thermal calibration frames concurrently with the PIR warm-up.
-        # Start-up frames are discarded first, then CALIBRATION_FRAMES frames are kept
-        # (same as the recordings). The PIR warm-up runs at the same time.
-        # If the thermopile is not working at start-up, the PIR-only backup is used and
-        # the most recent saved background is loaded once thermal frames arrive.
         self.startTime = time.time()
         calibrations = []
         discarded = 0
@@ -981,7 +980,7 @@ class RealTimeSystem:
                 if self.recalibrateEvent.is_set():
                     self.recalibrateEvent.clear()
                     calibrations = []
-                    discarded = CALIBRATION_DISCARD_FRAMES
+                    discarded = 20
                     calibrated = False
                     startupFailed = False
                     fusedActive = False
@@ -995,16 +994,16 @@ class RealTimeSystem:
 
                 if not calibrated and not startupFailed and not gap:
                     # Normal start-up calibration
-                    if discarded < CALIBRATION_DISCARD_FRAMES:
+                    if discarded < 20:
                         discarded += 1
                         self.publish(warmup="WARM-UP: sensor settling — keep detection zone empty",
-                                     status=f"Discarding start-up frames · {discarded}/{CALIBRATION_DISCARD_FRAMES}")
+                                     status=f"Calibrating PIR")
                         continue
                     calibrations.append(frame)
                     self.publish(warmup="WARM-UP: calibrating — keep detection zone empty",
-                                 status=f"Calibrating thermopile · {len(calibrations)}/{CALIBRATION_FRAMES} frames"
+                                 status=f"Calibrating thermopile"
                                         + ("" if self.pirProcessor.initialised else " · PIR warming up"))
-                    if len(calibrations) < CALIBRATION_FRAMES:
+                    if len(calibrations) < 40:
                         continue
                     self.thermal.calibrate(calibrations)
                     calibrated = True

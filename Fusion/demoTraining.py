@@ -563,6 +563,4 @@ def runDemoTraining(runName, folder, window, modelPath, backupPath, progress=pri
 # Describe the active thermal foreground threshold mode
 def _thresholdText():
     from Thermopile import processing
-    if getattr(processing, "USE_FIXED_THRESHOLD", False):
-        return f"fixed Z {processing.FIXED_Z_RAW:g} (average detector {processing.FIXED_Z_AVG:g})"
-    return "temperature table"
+    return f"fixed Z {processing.THRESHOLD:g} (average detector 3.45)"

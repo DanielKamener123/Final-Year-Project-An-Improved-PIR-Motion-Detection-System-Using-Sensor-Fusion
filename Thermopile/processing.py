@@ -11,9 +11,7 @@ FRAME_SHAPE = (HEIGHT, WIDTH)
 # Background adaptation and minimum noise level
 ALPHA = 0.995
 SIGMA_MIN = 0.15
-
-# Minimum quiet pixels needed for scene correction
-MIN_QUIET_FRACTION = 0.25
+THRESHOLD = 3.0
 
 # Gaussian smoothing weights
 centerWeight = 4.0
@@ -29,52 +27,9 @@ GLITCH_SHIFT_C = 3.0
 GLITCH_MAX_S = 30.0
 FEATURE_HOLD_S = 1.0
 
-# Minimum allowed thermal detection threshold
-THRESHOLD_FLOOR = 1.2
-
-# Fixed Z thresholds used for the demo
-USE_FIXED_THRESHOLD = True
-FIXED_Z_RAW = 3.0
-FIXED_Z_AVG = 3.45
-
-# Remove common sensor noise from pixel groups
-GROUP_DENOISE = True
-
-# Adjust calibration noise for the corrected thermal frames
-DENOISE_SIGMA_SCALE = 0.4
 _rows, _cols = np.indices((HEIGHT, WIDTH))
 PIXEL_GROUP = ((_rows + _cols) % 2) * 4 + (_cols % 4)
 PIXEL_GROUPS = [PIXEL_GROUP == g for g in range(8)]
-
-# Optional temperature based thresholds for current frames
-THRESHOLD_TABLE_RAW = [
-    (13.0, 15.49),
-    (15.0, 9.11),
-    (17.0, 6.85),
-    (19.0, 4.29),
-    (21.0, 2.14),
-    (23.0, 1.87),
-    (25.0, 1.70),
-    (27.0, 1.76),
-    (29.0, 1.79),
-    (31.0, 1.86),
-    (33.0, 1.69),
-]
-
-# Optional thresholds for averaged frames
-THRESHOLD_TABLE_AVG = [
-    (13.0, 21.90),
-    (15.0, 12.86),
-    (17.0, 9.67),
-    (19.0, 5.98),
-    (21.0, 2.72),
-    (23.0, 2.11),
-    (25.0, 1.78),
-    (27.0, 1.83),
-    (29.0, 1.91),
-    (31.0, 2.28),
-    (33.0, 1.97),
-]
 
 # Combine recent frames to reveal weak thermal targets
 AVG_WINDOW_S = 0.8
@@ -84,9 +39,6 @@ CONFIRM_M = 2
 CONFIRM_WINDOW_S = 0.8
 STRONG_RATIO = 1.5
 CONFIRM_MAX_STEP_PX = 9.0
-
-# Allow larger blobs to move further between frames
-GATE_PER_SQRT_PX = 2.5
 
 # Blob tracking and primary track settings
 max_match_distance = 9
@@ -123,14 +75,7 @@ STATIC_WINDOW_S = 4.0
 STATIC_PX = 1.5
 STATIC_PIXEL_SHARE = 0.5
 
-# Remove sensor noise before measuring frame changes
-FD_DENOISE = True
-FD_NOISE_THRESHOLD_DENOISED_C = 0.6
-
-# Keep tracking fast moving blobs with larger jumps
-RUNNER_GATE = True
-
-# Calculate the median without a library helper
+# Calculate Median
 def median(values):
     ordered = sorted(values)
     n = len(ordered)
@@ -158,10 +103,8 @@ def grow_mask(mask):
             grown |= padded[dr:dr + rows, dc:dc + cols]
     return grown
 
-# Manage thermal background and pixel noise
 class BackgroundModel:
-
-    # Initial background and noise arrays
+    # Initialise Background
     def __init__(self, shape):
         self.bg = np.zeros(shape)
         self.sigma = np.full(shape, SIGMA_MIN)
@@ -171,17 +114,18 @@ class BackgroundModel:
     # Set the working noise estimate from calibration
     def _set_sigma(self, calibration_sigma):
         self.calibration_sigma = np.asarray(calibration_sigma, dtype=np.float64).reshape(self.bg.shape).copy()
-        sigma = self.calibration_sigma * DENOISE_SIGMA_SCALE if GROUP_DENOISE else self.calibration_sigma
+        sigma = self.calibration_sigma * 0.4
         self.sigma = np.maximum(sigma, SIGMA_MIN)
 
     # Learn the background from empty frames
     def calibration(self, calibration_frames):
+        # Update Array in memory instead of refrencing new array
         self.bg[:] = np.median(calibration_frames, axis=0)
         measured_sigma = calibration_frames.std(axis=0)
         self._set_sigma(measured_sigma)
         self._initialised = True
 
-    # Restore an earlier sensor calibration
+    # Restore earlier sensor calibration
     def load(self, background, sigma):
         self.bg[:] = np.asarray(background, dtype=np.float64).reshape(self.bg.shape)
         self._set_sigma(sigma)
@@ -189,8 +133,7 @@ class BackgroundModel:
 
     # Update only background pixels and absorb persistent objects
     def update(self, frame, foreground_mask, absorb_mask=None):
-
-        # Exclude foreground pixels from normal background updates
+        # Invert Foreground Mask
         update_mask = ~foreground_mask
 
         # Slowly learn persistent foreground into the background
@@ -209,7 +152,7 @@ class BackgroundModel:
         new_sigma = np.maximum(new_sigma, SIGMA_MIN)
         self.sigma = np.where(update_mask, new_sigma, self.sigma)
 
-    # Estimate the shared temperature offset of each pixel group
+    # Estimate the shared temperature offset of each pixel group - Used For scene shifting
     def group_shift(self, frame, previous_mask):
         difference = frame - self.bg
 
@@ -218,28 +161,28 @@ class BackgroundModel:
         shift = np.zeros_like(difference)
         for group in PIXEL_GROUPS:
             values = difference[group & quiet]
-            if values.size < MIN_QUIET_FRACTION * np.count_nonzero(group):
+            if values.size < 0.25 * np.count_nonzero(group):
                 values = difference[group]
             shift[group] = np.median(values)
         return shift
 
-    # Estimate whole scene temperature movement from quiet pixels
+    # Estimate whole scene temperature movement from quiet pixels - used for glitch detection
     def scene_shift(self, frame, previous_mask):
         difference = frame - self.bg
 
         # Avoid previously detected objects when estimating offsets
         quiet = ~grow_mask(previous_mask)
-        if np.count_nonzero(quiet) >= MIN_QUIET_FRACTION * difference.size:
+        if np.count_nonzero(quiet) >= 0.25 * difference.size:
             values = difference[quiet]
         else:
             values = difference.reshape(-1)
         return median(values.tolist())
 
-    # Correct the saved background for a scene shift
+    # Scene shift
     def apply_shift(self, shift):
         self.bg = self.bg + shift
 
-    # Measure each pixel deviation in units of its noise
+    # Determine z Value
     def z_score(self, frame):
         return np.abs(self.bg - frame) / self.sigma
 
@@ -247,7 +190,7 @@ class BackgroundModel:
     def scene_temperature(self):
         return float(np.mean(self.bg))
 
-# Smooth thermal values using a three by three kernel
+# Gaussian Filter
 def gaussian_filter(z_grid):
     rows, cols = z_grid.shape
     padded = pad_edges(z_grid)
@@ -256,23 +199,6 @@ def gaussian_filter(z_grid):
         for dc in range(3):
             smoothed += gaussianKernel[dr, dc] * padded[dr:dr + rows, dc:dc + cols]
     return smoothed
-
-# Interpolate thresholds from background temperature
-def threshold_from_table(background, table):
-
-    threshold_map = np.full(background.shape, table[-1][1])
-    done = background >= table[-1][0]
-    below = background <= table[0][0]
-    threshold_map[below] = table[0][1]
-    done |= below
-    for k in range(len(table) - 1):
-        bg0, t0 = table[k]
-        bg1, t1 = table[k + 1]
-        inside = ~done & (background >= bg0) & (background <= bg1)
-        threshold_map[inside] = t0 + (t1 - t0) * (background[inside] - bg0) / (bg1 - bg0)
-        done |= inside
-
-    return np.maximum(threshold_map * 0.8, THRESHOLD_FLOOR)
 
 # Calculate the Z score across recent frames
 def averaged_z(difference_history, sigma):
@@ -290,9 +216,9 @@ def threshold_ratio(smoothed_raw, threshold_raw, smoothed_avg, threshold_avg):
     avg_ratio = smoothed_avg / threshold_avg
     return np.where(raw_ratio > avg_ratio, raw_ratio, avg_ratio)
 
-@dataclass
 
 # Store the pixels, centre and bounds of one blob
+@dataclass
 class Blob:
     id: int
     pixel_count: int
@@ -324,6 +250,12 @@ def weighted_centroid(weights, blob_mask):
         return (sum_r / count, sum_c / count)
     return (sum_wr / sum_w, sum_wc / sum_w)
 
+def centroid(blob_mask):
+    rows, cols = np.nonzero(blob_mask)               
+    if rows.size == 0:                              
+        return (0.0, 0.0)
+    return (float(rows.mean()), float(cols.mean()))
+
 # Find maximum displacement over the movement window
 def pixels_traversed(current_centre, history):
     largest = 0.0
@@ -340,28 +272,34 @@ def label_blobs(binary_mask):
     rows, cols = binary_mask.shape
     labelled_grid = np.zeros((rows, cols), dtype=int)
     num_blobs = 0
+
     for r in range(rows):
         for c in range(cols):
 
-            # Ignore background and already visited pixels
+            # Skip if background or already belongs to a blob
             if not binary_mask[r, c] or labelled_grid[r, c]:
                 continue
 
             num_blobs += 1
             labelled_grid[r, c] = num_blobs
             to_visit = [(r, c)]
+
             while to_visit:
+                # Remove first item in to visit list
                 pr, pc = to_visit.pop()
+
+                # Look through every pixel in the 3x3 radius from pixel
                 for nr in range(pr - 1, pr + 2):
                     for nc in range(pc - 1, pc + 2):
-                        if (0 <= nr < rows and 0 <= nc < cols
-                                and binary_mask[nr, nc] and not labelled_grid[nr, nc]):
+                        # If it exists, is in the binary mask and is not labelled aready, add to blob
+                        if (0 <= nr < rows and 0 <= nc < cols and binary_mask[nr, nc] and not labelled_grid[nr, nc]):
                             labelled_grid[nr, nc] = num_blobs
                             to_visit.append((nr, nc))
     return labelled_grid, num_blobs
 
 # Turn connected components into blob objects
 def extract_blobs(binary_mask, weights=None):
+    # First Get All Blobs
     labelled_grid, num_blobs = label_blobs(binary_mask)
 
     blobs: list[Blob] = []
@@ -386,9 +324,8 @@ def extract_blobs(binary_mask, weights=None):
 
     return blobs
 
-@dataclass
-
 # Remember a blob position and history between frames
+@dataclass
 class Track:
     id: int
     centroid: tuple[float, float]
@@ -401,9 +338,8 @@ class Track:
     first_seen: float = None
     long_history: list = None
 
-@dataclass
-
 # Store measurements extracted from a blob
+@dataclass
 class BlobFeatures:
     track_id: int
     centroid: tuple[float, float]
@@ -416,7 +352,6 @@ class BlobFeatures:
 
 # Extract size, age and temperature features
 def score_blob(blob, track, temperature_difference):
-
     # Create a new track if no previous blob matches
     if track is None:
         track_age_frames = 1
@@ -458,19 +393,22 @@ def match_previous_blob(blob, tracks, used_track_ids, max_match_distance):
         dc = blob.centroid[1] - track.centroid[1]
         dist = float(np.hypot(dr, dc))
 
-        gate = GATE_PER_SQRT_PX * (blob.pixel_count ** 0.5)
+        # Maximum distance this blob may have moved since the track's last position - Small/far blobs wont move more than 9 pixels
+        # Large/close blobs move further across the image per frame, so the limit grows
+        # with blob width: 2.5 x sqrt(pixel count)
+        gate = 2.5 * (blob.pixel_count ** 0.5)
         if gate < max_match_distance:
             gate = max_match_distance
 
+        # Find closest track
         if dist <= gate and (best_dist is None or dist < best_dist):
             best_dist = dist
             best_track = track
 
     return best_track
 
-@dataclass
-
 # Bundle a confirmed blob with its extracted features
+@dataclass
 class DetectionResult:
     blob: Blob
     features: BlobFeatures
@@ -504,7 +442,6 @@ def emptyThermalFeatures():
 
 # Process thermal frames into features for fusion
 class ThermopilePipeline:
-
     # Create background, tracking and frame history state
     def __init__(self, frame_shape=FRAME_SHAPE, window_seconds=2.0):
         self.frame_shape = frame_shape
@@ -519,10 +456,8 @@ class ThermopilePipeline:
         self.last_raw_z = np.zeros(frame_shape)
         self.last_smoothed_z = np.zeros(frame_shape)
         self.last_mask = np.zeros(frame_shape, dtype=bool)
-        self.last_threshold = THRESHOLD_FLOOR
         self.last_scene_temp = 0.0
         self.last_shift = 0.0
-        self.last_threshold_map = np.full(frame_shape, THRESHOLD_FLOOR)
         self.last_ratio = np.zeros(frame_shape)
         self.last_smoothed_z_avg = np.zeros(frame_shape)
         self.last_detections = []
@@ -584,7 +519,6 @@ class ThermopilePipeline:
 
     # Calculate frame difference features without crossing data gaps
     def update_fd(self, frame, timestamp):
-        """Causal FD, never bridges an acquisition outage."""
         timestamp = float(timestamp)
 
         # Reset history if timestamps are out of order
@@ -597,12 +531,8 @@ class ThermopilePipeline:
             self.fd_frames.clear()
             self.fd_activity.clear()
 
-        # Choose raw or smoothed frames based on noise correction mode
-        if FD_DENOISE:
-            filtered = np.asarray(frame, dtype=np.float64)
-        else:
-            filtered = gaussian_filter(np.asarray(frame, dtype=np.float64))
-
+        filtered = np.asarray(frame, dtype=np.float64)
+        
         # Find the frame closest to the required time offset
         target = timestamp - FD_LAG_SECONDS
         previous = min(self.fd_frames, key=lambda item: abs(item[0] - target), default=None)
@@ -611,18 +541,12 @@ class ThermopilePipeline:
         # Only compare frames with an acceptable time separation
         if previous is not None and previous[0] < timestamp and abs(previous[0] - target) <= 0.20:
 
-            # Choose raw or smoothed frames based on noise correction mode
-            if FD_DENOISE:
-
-                # Remove shared readout changes before smoothing
-                change = filtered - previous[1]
-                for group in PIXEL_GROUPS:
-                    change[group] = change[group] - np.median(change[group])
-                absdiff = np.abs(gaussian_filter(change))
-                noise_threshold = FD_NOISE_THRESHOLD_DENOISED_C
-            else:
-                absdiff = np.abs(filtered - previous[1])
-                noise_threshold = FD_NOISE_THRESHOLD_C
+            # Remove shared readout changes before smoothing
+            change = filtered - previous[1]
+            for group in PIXEL_GROUPS:
+                change[group] = change[group] - np.median(change[group])
+            absdiff = np.abs(gaussian_filter(change))
+            noise_threshold = 0.6
 
             # Measure frame difference strength and active pixel count
             data.update(fdMeanAbs=float(absdiff.mean()), fdMaxAbs=float(absdiff.max()),
@@ -681,10 +605,7 @@ class ThermopilePipeline:
         self.update_fd(frame, now)
 
         # Correct background using the shared offset of pixel groups
-        if GROUP_DENOISE:
-            self.bg_model.apply_shift(self.bg_model.group_shift(frame, self._prev_mask))
-        else:
-            self.bg_model.apply_shift(shift)
+        self.bg_model.apply_shift(self.bg_model.group_shift(frame, self._prev_mask))
 
         # Calculate pixel deviation from the background
         z = self.bg_model.z_score(frame)
@@ -701,12 +622,9 @@ class ThermopilePipeline:
 
         # Select fixed or temperature based detection limits
         scene_temp = self.bg_model.scene_temperature()
-        if USE_FIXED_THRESHOLD:
-            threshold_raw = np.full(self.frame_shape, FIXED_Z_RAW)
-            threshold_avg = np.full(self.frame_shape, FIXED_Z_AVG)
-        else:
-            threshold_raw = threshold_from_table(self.bg_model.bg, THRESHOLD_TABLE_RAW)
-            threshold_avg = threshold_from_table(self.bg_model.bg, THRESHOLD_TABLE_AVG)
+
+        threshold_raw = np.full(self.frame_shape, THRESHOLD)
+        threshold_avg = np.full(self.frame_shape, 3.45)
 
         # Mark a pixel when either detector passes its threshold
         ratio = threshold_ratio(smoothed_z, threshold_raw, smoothed_z_avg, threshold_avg)
@@ -776,8 +694,7 @@ class ThermopilePipeline:
 
             # Allow fast blobs a larger confirmation distance
             confirm_step = CONFIRM_MAX_STEP_PX
-            if RUNNER_GATE:
-                confirm_step = max(CONFIRM_MAX_STEP_PX, GATE_PER_SQRT_PX * (blob.pixel_count ** 0.5))
+            confirm_step = max(CONFIRM_MAX_STEP_PX, 2.5 * (blob.pixel_count ** 0.5))
             if (step_dr * step_dr + step_dc * step_dc) ** 0.5 > confirm_step:
                 seen_times = []
             seen_times.append(now)

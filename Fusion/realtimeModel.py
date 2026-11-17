@@ -9,19 +9,6 @@ from Fusion.gradientBoosting import GradientBoosting
 STATES = ("NO INTRUDER", "MAYBE INTRUDER", "INTRUDER")
 NO_INTRUDER, MAYBE_INTRUDER, INTRUDER = 0, 1, 2
 
-# Force maximum confidence for strong PIR movement
-# The 2 V limit is above the measured empty venue signals
-USE_PIR_STRONG_RULE = True
-PIR_STRONG_V = 2.0
-
-# Override the confidence when the PIR signal is strong enough
-# Works with one score or an array of scores
-def applyPirStrongRule(scores, pirPeakToPeak):
-    if not USE_PIR_STRONG_RULE:
-        return scores
-
-    return np.where(np.asarray(pirPeakToPeak, dtype=np.float64) > PIR_STRONG_V, 1.0, scores)
-
 # Convert classifier confidence into the three alarm states
 class StateMachine:
     def __init__(self, thresholds):
@@ -33,12 +20,6 @@ class StateMachine:
 
         # Time the score must stay low before leaving INTRUDER
         self.hold_s = float(thresholds.get("hold_s", 0.0))
-
-        # Check that thresholds and hold time are valid
-        if not 0 <= self.maybe_exit < self.maybe_enter < self.intruder_exit < self.intruder_enter <= 1:
-            raise ValueError("Invalid three-state hysteresis thresholds")
-        if self.hold_s < 0:
-            raise ValueError("hold_s must be >= 0")
 
         # Start with no alarm and no active hold timer
         self.state = NO_INTRUDER
@@ -115,6 +96,7 @@ class RealtimeModel:
         self.pir_threshold = float(PIR_THRESHOLD)
 
     # Whether a valid PIR backup model was loaded
+    # @property lets you read this function like a variable
     @property
     def has_backup(self):
         return self.backup is not None
@@ -193,3 +175,7 @@ class RealtimeModel:
             "fusion_confidence": fusion_score,
             "mode": mode,
         }
+
+# Works with one score (live) or an array of scores (offline evaluation)
+def applyPirStrongRule(scores, pirPeakToPeak):
+    return np.where(np.asarray(pirPeakToPeak, dtype=np.float64) > 2, 1.0, scores)

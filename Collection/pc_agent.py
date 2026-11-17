@@ -120,7 +120,6 @@ def promptDataType():
         print("Please type 'training', 'validation' or 'testing'.")
 
 def chooseRun(split):
-    """Create a uniquely named recording folder; never reuse an existing one."""
     splitDir = DATASET_ROOT / split
     splitDir.mkdir(parents=True, exist_ok=True)
 
